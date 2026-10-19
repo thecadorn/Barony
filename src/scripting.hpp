@@ -46,8 +46,21 @@ namespace Scripting
 	std::vector<std::pair<std::string, std::string>> savedSpellTable();
 	std::map<int, int> savedSpellRemap(const std::vector<std::pair<std::string, std::string>>& additionalData);
 
+	// Shared values (barony.setShared/getShared) belong to the current run: cleared when a new
+	// run starts, written into the save's additional_data and restored from it on load.
+	void resetSharedValues();
+	std::vector<std::pair<std::string, std::string>> savedSharedTable();
+	void restoreSharedValues(const std::vector<std::pair<std::string, std::string>>& additionalData);
+
 	// Re-adds script-defined spells' tooltip text after readTooltipsFromFile() reloads templates.
 	void reapplyCustomSpellTooltips();
+
+	// Fires onBeforeSpellCast on the host before a cast's mana is paid (or fizzle is rolled).
+	// Returns false if a callback rejected the cast; its message has then been shown to the
+	// caster. Host only for now: the caster's machine has already played the cast animation.
+	// Running it on the caster's machine too (in castSpellInit, before the animation) needs
+	// whatever state the callbacks read, e.g. shared values, to be synced to clients first.
+	bool onBeforeSpellCast(spell_t* spell, int player);
 
 	// Fires onSpellCast once a cast has passed the fizzle checks and mana is paid. `player` is
 	// the casting player's index, or -1 for monsters and traps. Host only. Returns false if a

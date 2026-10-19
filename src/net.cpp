@@ -5278,6 +5278,21 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		}
 	}},
 
+	// the host revived our dead player mid-floor (see revivePlayer())
+	{'RVIV', [](){
+		const int player = net_packet->data[4];
+		if ( player != clientnum )
+		{
+			return;
+		}
+		const bool keepItems = net_packet->data[5] != 0;
+		if ( !keepItems )
+		{
+			removePlayerItemsLeftOnDeath(player); // someone took them from the loot bag
+		}
+		clearLocalPlayerDeathState(player);
+	}},
+
 	// update sex
 	{'SEXU', [](){
 		int player = static_cast<int>(net_packet->data[4]);

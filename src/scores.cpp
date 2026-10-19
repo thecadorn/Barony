@@ -6044,6 +6044,10 @@ int SaveGameInfo::populateFromSession(const int playernum)
 	{
 		info->additional_data.push_back(entry); // lets loading match custom spells by name
 	}
+	for ( auto& entry : Scripting::savedSharedTable() )
+	{
+		info->additional_data.push_back(entry); // script mods' run state (barony.setShared)
+	}
 
 
 	if ( info->game_version >= 410 )
@@ -6368,6 +6372,7 @@ int loadGame(int player, const SaveGameInfo& info) {
 	// Script-defined spell IDs depend on the installed script mods, so map the IDs this
 	// save used to the current ones by name. Unknown IDs in the script range become SPELL_NONE.
 	const std::map<int, int> scriptSpellRemap = Scripting::savedSpellRemap(info.additional_data);
+	Scripting::restoreSharedValues(info.additional_data);
 	auto remapSpellID = [&scriptSpellRemap](int spellID) -> int {
 		if ( spellID < Scripting::kCustomSpellIDStart || spellID >= Scripting::kCustomSpellIDEnd )
 		{

@@ -618,6 +618,12 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 		}
 	}
 
+	// script mods can reject the cast before any mana is spent (they tell the caster why)
+	if ( !Scripting::onBeforeSpellCast(spell, player) )
+	{
+		return nullptr;
+	}
+
 	bool newbie = false;
 	bool overdrewIntoHP = false;
 	bool playerCastingFromKnownSpellbook = false;
