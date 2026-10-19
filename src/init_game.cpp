@@ -46,6 +46,10 @@
 #include <future>
 #include <chrono>
 
+#ifdef WINDOWS
+#undef GetObject // windows.h macro clashes with rapidjson::GenericValue::GetObject
+#endif
+
 /*-------------------------------------------------------------------------------
 
 	initGame
