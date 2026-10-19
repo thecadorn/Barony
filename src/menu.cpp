@@ -8968,6 +8968,7 @@ void doNewGame(bool makeHighscore) {
 				GenericGUI[c].assistShrineGUI.resetSavedCharacterChanges();
 			}
 		} else {
+			Scripting::resetSharedValues(); // a new run starts with no script state
 			for (int c = 0; c < MAXPLAYERS; ++c) {
 				if (!client_disconnected[c]) {
 					GenericGUI[c].assistShrineGUI.onGameStart();

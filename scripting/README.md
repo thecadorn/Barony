@@ -34,6 +34,7 @@ end)
 
 - [`examples/hello_world`](examples/hello_world/main.lua): logs a line at startup.
 - [`examples/sunburst`](examples/sunburst/main.lua): defines a custom spell, teaches it to every new character, puts it on the hotbar, and gives it its own effect (raising the caster's max HP).
+- [`examples/resurrection`](examples/resurrection/main.lua): a multiplayer spell that brings a fallen ally back to life next to the caster, limited by a party-wide pool of charges.
 
 ## API reference
 
@@ -46,6 +47,7 @@ The complete, typed API is in [`barony.d.lua`](barony.d.lua). If your editor use
 | `barony.onInit(fn())` | Once at startup, after all script mods have loaded. Define custom spells here. |
 | `barony.onGameStart(fn(player))` | A new run starts, after each local player's class loadout is set up. Not called when loading a save. |
 | `barony.onBeforeGameplayStart(fn(player))` | A new run is fully set up, including the default hotbar, right before play begins. Arrange the hotbar here. |
+| `barony.onBeforeSpellCast(fn(spellName, player))` | A spell is about to be cast, before any mana is spent. Return `false, "reason"` to refuse it; the caster sees the reason. |
 | `barony.onSpellCast(fn(spellName, player))` | Any spell is successfully cast. `player` is `nil` for monsters and traps. Return `false` to skip the spell's normal effect. |
 
 **Functions and objects**
@@ -56,7 +58,11 @@ The complete, typed API is in [`barony.d.lua`](barony.d.lua). If your editor use
 | `barony.version` | The game version, e.g. `"v5.0.2"`. |
 | `barony.registerSpell{...}` | Defines a new spell based on an existing one. See below. |
 | `barony.teachSpell(player, spellName)` | Teaches a player a spell. |
-| `barony.player(player)` | The player's stats: `hp`, `maxhp`, `mp`, `maxmp`. |
+| `barony.player(player)` | The player's stats (`hp`, `maxhp`, `mp`, `maxmp`), whether they're `alive` (or their `state`: `"alive"`, `"dying"` or `"dead"`), their position (`x`, `y`), and `revive(x, y)` to bring them back to life when `canRevive` is true. |
+| `barony.maxPlayers` | How many player slots there are; players are numbered 0 to `maxPlayers - 1`. |
+| `barony.message(player, text)` | Shows a line in a player's in-game message log. |
+| `barony.isHost()` | `true` on the host and in single player, where gameplay is decided. |
+| `barony.setShared(name, value)` / `barony.getShared(name)` | A named number for the current run (for example a party-wide counter). Saved with the game, cleared when a new run starts. Host only for now. |
 | `barony.hotbar(player)` | The player's hotbar: `getSlot`, `setSlot`, `clearSlot`, `firstEmptySlot`. Slots are numbered 0–9. |
 | `barony.inventory(player)` | The player's inventory: `findSpell(spellName)`. |
 

@@ -14,6 +14,10 @@ barony = {}
 ---@type string
 barony.version = ""
 
+---How many player slots the game has (players are numbered 0 to maxPlayers - 1).
+---@type integer
+barony.maxPlayers = 4
+
 ---Writes a line to the game's log.txt, prefixed with the mod's name.
 ---Arguments are converted with tostring and joined by spaces. `print` is an alias.
 ---@param ... any
@@ -31,6 +35,16 @@ function barony.onInit(callback) end
 ---or true to let it happen. Every registered callback runs either way.
 ---@param callback fun(spellName: string, player: integer?): boolean?
 function barony.onSpellCast(callback) end
+
+---Registers a function to run when a spell is about to be cast, before any mana is spent.
+---Return false to reject the cast, optionally followed by a message shown to the caster:
+---    return false, "You can't do that right now."
+---Return nothing to allow it. Rejection stops at the first callback that rejects.
+---`player` is the caster's player index, or nil for monsters and traps.
+---Multiplayer: runs on the host (like onSpellCast), so it can read shared values. A client's
+---cast animation has already played by then; only the cost and the effect are prevented.
+---@param callback fun(spellName: string, player: integer?): boolean?, string?
+function barony.onBeforeSpellCast(callback) end
 
 ---Registers a function to run for each local player when a new run starts
 ---(after their class loadout is set up; not when loading a saved game).
@@ -139,4 +153,41 @@ function barony.player(player) end
 ---@field maxhp integer  Maximum health
 ---@field mp integer     Current mana
 ---@field maxmp integer  Maximum mana
+---@field alive boolean  Whether the player is alive (false while dead or a ghost)
+---@field state "alive"|"dying"|"dead" "dying" while the death animation plays; "dead" once the body is gone (death screen or ghost)
+---@field canRevive boolean Whether revive() would succeed right now: fully dead and still connected
+---@field x number?      World X position (16 units per tile), or nil while dead
+---@field y number?      World Y position (16 units per tile), or nil while dead
 local Player = {}
+
+---Brings a dead player back to life on a free tile next to (x, y), with half their HP and
+---mana. If nobody has opened the loot bag they dropped on death, the bag disappears and they
+---keep all their items, still equipped; otherwise whoever opened it keeps them.
+---Host only (e.g. from onSpellCast). Returns false unless `canRevive` is true.
+---@param x number World X position, e.g. another player's `x`
+---@param y number World Y position
+---@return boolean
+function Player:revive(x, y) end
+
+---Returns true on the host (and in singleplayer), where gameplay is decided and where
+---onSpellCast runs. Use it to run host-only code from events that fire on every machine.
+---@return boolean
+function barony.isHost() end
+
+---Stores a named number for the current run, e.g. a party-wide counter. Pass nil to remove it.
+---Values are cleared when a new run starts and are saved with the game.
+---Host only: shared values are not sent to clients yet, so calling this on a client errors.
+---@param name string 1-64 letters, digits or _
+---@param value number?
+function barony.setShared(name, value) end
+
+---Returns a number stored with barony.setShared, or nil if it isn't set. Host only.
+---@param name string
+---@return number?
+function barony.getShared(name) end
+
+---Shows a line of text in a player's in-game message log (up to 255 characters).
+---On the host this also reaches players on other machines.
+---@param player integer
+---@param text string
+function barony.message(player, text) end

@@ -56,6 +56,7 @@ namespace Scripting
 		std::vector<ScriptMod> mods;
 		std::vector<Callback> onInitCallbacks;
 		std::vector<Callback> onSpellCastCallbacks;
+		std::vector<Callback> onBeforeSpellCastCallbacks;
 		std::vector<Callback> onGameStartCallbacks;
 		std::vector<Callback> onBeforeGameplayStartCallbacks;
 
@@ -77,6 +78,18 @@ namespace Scripting
 		};
 		std::vector<CustomSpell> customSpells; // customSpells[i] has ID kCustomSpellIDStart + i
 		bool registrationOpen = false;         // spells can only be defined while scripts initialize
+
+		// Shared values: named numbers for game-wide state such as a party's resurrection
+		// charges. They belong to the current run: cleared when a new run starts, stored in
+		// the save game and restored on load.
+		//
+		// They live on the host only, which is enough while only host-side code reads them
+		// (onSpellCast). To let clients read them too (e.g. to refuse a cast up front, or to
+		// show a value in the UI), the host would send a packet ("SHRD": name + value) to every
+		// client whenever setShared() changes a value, plus a full snapshot when a client joins
+		// or a level loads; clients would store the received values in this same map and
+		// getShared() would stop being host-only.
+		std::map<std::string, lua_Number> sharedValues;
 
 		void* sandboxAlloc(void*, void* ptr, size_t osize, size_t nsize)
 		{
@@ -196,6 +209,14 @@ namespace Scripting
 		int api_onSpellCast(lua_State* L)
 		{
 			addCallback(onSpellCastCallbacks, L);
+			return 0;
+		}
+
+		// barony.onBeforeSpellCast(fn): fn(spellName, player) runs before a spell's cost is paid.
+		// Returning false (optionally followed by a message for the caster) rejects the cast.
+		int api_onBeforeSpellCast(lua_State* L)
+		{
+			addCallback(onBeforeSpellCastCallbacks, L);
 			return 0;
 		}
 
@@ -755,12 +776,42 @@ namespace Scripting
 			return stats[player];
 		}
 
+		// player:revive(x, y): brings a dead player back next to (x, y). Host only.
+		int player_revive(lua_State* L)
+		{
+			int player;
+			checkPlayerStats(L, player);
+			const real_t x = luaL_checknumber(L, 2);
+			const real_t y = luaL_checknumber(L, 3);
+			if ( multiplayer == CLIENT )
+			{
+				return luaL_error(L, "players can only be revived on the host");
+			}
+			lua_pushboolean(L, revivePlayer(player, x, y));
+			return 1;
+		}
+
 		int player_index(lua_State* L)
 		{
 			int player;
 			Stat* stat = checkPlayerStats(L, player);
 			const char* key = luaL_checkstring(L, 2);
+			Entity* entity = players[player]->entity;
 			if ( !strcmp(key, "index") ) { lua_pushinteger(L, player); return 1; }
+			if ( !strcmp(key, "alive") ) { lua_pushboolean(L, entity && stat->HP > 0); return 1; }
+			if ( !strcmp(key, "state") )
+			{
+				// "dying": the body is still there but HP ran out (death animation).
+				// "dead": the body is gone. A player with no body and HP left (briefly, while a
+				// level loads or a revive reaches a client) also reads as "dead", but can't be
+				// revived; check canRevive for that.
+				lua_pushstring(L, entity ? (stat->HP > 0 ? "alive" : "dying") : "dead");
+				return 1;
+			}
+			if ( !strcmp(key, "canRevive") ) { lua_pushboolean(L, canRevivePlayer(player)); return 1; }
+			if ( !strcmp(key, "x") ) { entity ? lua_pushnumber(L, entity->x) : lua_pushnil(L); return 1; }
+			if ( !strcmp(key, "y") ) { entity ? lua_pushnumber(L, entity->y) : lua_pushnil(L); return 1; }
+			if ( !strcmp(key, "revive") ) { lua_pushcfunction(L, player_revive); return 1; }
 			if ( !strcmp(key, "hp") ) { lua_pushinteger(L, stat->HP); return 1; }
 			if ( !strcmp(key, "maxhp") ) { lua_pushinteger(L, stat->MAXHP); return 1; }
 			if ( !strcmp(key, "mp") ) { lua_pushinteger(L, stat->MP); return 1; }
@@ -928,6 +979,84 @@ namespace Scripting
 			return 0;
 		}
 
+		bool isValidSharedName(const char* name)
+		{
+			const size_t length = strlen(name);
+			if ( length == 0 || length > 64 )
+			{
+				return false;
+			}
+			for ( size_t i = 0; i < length; ++i )
+			{
+				if ( !isalnum((unsigned char)name[i]) && name[i] != '_' )
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
+		bool checkSharedAccess(lua_State* L, const char* function)
+		{
+			if ( multiplayer == CLIENT )
+			{
+				luaL_error(L, "barony.%s is host-only (shared values aren't sent to clients yet)", function);
+			}
+			const char* name = luaL_checkstring(L, 1);
+			luaL_argcheck(L, isValidSharedName(name), 1, "name must be 1-64 letters, digits or _");
+			return true;
+		}
+
+		// barony.setShared(name, value): stores a number (or nil to remove it). Host only.
+		int api_setShared(lua_State* L)
+		{
+			checkSharedAccess(L, "setShared");
+			const char* name = lua_tostring(L, 1);
+			if ( lua_isnoneornil(L, 2) )
+			{
+				sharedValues.erase(name);
+				return 0;
+			}
+			const lua_Number value = luaL_checknumber(L, 2);
+			sharedValues[name] = value;
+			return 0;
+		}
+
+		// barony.getShared(name): the stored number, or nil. Host only.
+		int api_getShared(lua_State* L)
+		{
+			checkSharedAccess(L, "getShared");
+			auto find = sharedValues.find(lua_tostring(L, 1));
+			if ( find == sharedValues.end() )
+			{
+				lua_pushnil(L);
+			}
+			else
+			{
+				lua_pushnumber(L, find->second);
+			}
+			return 1;
+		}
+
+		// barony.isHost(): true on the host and in singleplayer, where gameplay is decided.
+		int api_isHost(lua_State* L)
+		{
+			lua_pushboolean(L, multiplayer != CLIENT);
+			return 1;
+		}
+
+		// barony.message(player, text): shows text in a player's message log. On the host this
+		// also reaches remote players.
+		int api_message(lua_State* L)
+		{
+			const int player = checkPlayerArg(L, 1);
+			const char* text = luaL_checkstring(L, 2);
+			char line[256]; // messages are copied into fixed-size buffers and packets
+			snprintf(line, sizeof(line), "%s", text);
+			messagePlayer(player, MESSAGE_MISC, "%s", line);
+			return 0;
+		}
+
 		// Builds the sandboxed _ENV for a mod and leaves it on the stack. Only safe
 		// globals are exposed, and library tables are copied so mods can't tamper
 		// with each other's.
@@ -968,11 +1097,16 @@ namespace Scripting
 				{ "log", api_log },
 				{ "onInit", api_onInit },
 				{ "onSpellCast", api_onSpellCast },
+				{ "onBeforeSpellCast", api_onBeforeSpellCast },
 				{ "onGameStart", api_onGameStart },
 				{ "teachSpell", api_teachSpell },
 				{ "registerSpell", api_registerSpell },
 				{ "hotbar", api_hotbar },
 				{ "player", api_player },
+				{ "setShared", api_setShared },
+				{ "getShared", api_getShared },
+				{ "isHost", api_isHost },
+				{ "message", api_message },
 				{ "inventory", api_inventory },
 				{ "onBeforeGameplayStart", api_onBeforeGameplayStart },
 				{ nullptr, nullptr },
@@ -981,6 +1115,8 @@ namespace Scripting
 			luaL_setfuncs(L, api, 1);
 			lua_pushstring(L, VERSION);
 			lua_setfield(L, -2, "version");
+			lua_pushinteger(L, MAXPLAYERS);
+			lua_setfield(L, -2, "maxPlayers");
 			lua_getfield(L, -1, "log");
 			lua_setfield(L, -3, "print"); // print() is an alias for barony.log()
 			lua_setfield(L, -2, "barony");
@@ -1106,9 +1242,50 @@ namespace Scripting
 		mods.clear();
 		onInitCallbacks.clear();
 		onSpellCastCallbacks.clear();
+		onBeforeSpellCastCallbacks.clear();
 		onGameStartCallbacks.clear();
 		onBeforeGameplayStartCallbacks.clear();
 		customSpells.clear();
+	}
+
+	bool onBeforeSpellCast(spell_t* spell, int player)
+	{
+		if ( !L || !spell || multiplayer == CLIENT )
+		{
+			return true;
+		}
+		for ( size_t i = 0; i < onBeforeSpellCastCallbacks.size(); ++i )
+		{
+			const Callback cb = onBeforeSpellCastCallbacks[i];
+			lua_rawgeti(L, LUA_REGISTRYINDEX, cb.fn);
+			lua_pushstring(L, spell->spell_internal_name);
+			if ( player >= 0 )
+			{
+				lua_pushinteger(L, player);
+			}
+			else
+			{
+				lua_pushnil(L);
+			}
+			if ( !protectedCall(cb.mod, 2, 2, "onBeforeSpellCast") )
+			{
+				continue; // a broken callback doesn't block casting
+			}
+			// only an explicit `return false` rejects; returning nothing allows the cast
+			const bool rejected = lua_isboolean(L, -2) && !lua_toboolean(L, -2);
+			if ( rejected && player >= 0 && lua_type(L, -1) == LUA_TSTRING )
+			{
+				char reason[256]; // messages are copied into fixed-size buffers and packets
+				snprintf(reason, sizeof(reason), "%s", lua_tostring(L, -1));
+				messagePlayer(player, MESSAGE_MISC, "%s", reason);
+			}
+			lua_pop(L, 2);
+			if ( rejected )
+			{
+				return false;
+			}
+		}
+		return true;
 	}
 
 	bool onSpellCast(spell_t* spell, int player)
@@ -1189,6 +1366,41 @@ namespace Scripting
 			}
 		}
 		return remap;
+	}
+
+	namespace
+	{
+		constexpr const char* kSavedSharedKeyPrefix = "script_shared_";
+	}
+
+	void resetSharedValues()
+	{
+		sharedValues.clear();
+	}
+
+	std::vector<std::pair<std::string, std::string>> savedSharedTable()
+	{
+		std::vector<std::pair<std::string, std::string>> table;
+		for ( auto& value : sharedValues )
+		{
+			char text[64];
+			snprintf(text, sizeof(text), "%.17g", (double)value.second);
+			table.emplace_back(kSavedSharedKeyPrefix + value.first, text);
+		}
+		return table;
+	}
+
+	void restoreSharedValues(const std::vector<std::pair<std::string, std::string>>& additionalData)
+	{
+		sharedValues.clear();
+		const size_t prefixLength = strlen(kSavedSharedKeyPrefix);
+		for ( auto& entry : additionalData )
+		{
+			if ( entry.first.compare(0, prefixLength, kSavedSharedKeyPrefix) == 0 )
+			{
+				sharedValues[entry.first.substr(prefixLength)] = (lua_Number)atof(entry.second.c_str());
+			}
+		}
 	}
 
 	void reapplyCustomSpellTooltips()

@@ -29,6 +29,8 @@
 #include "mod_tools.hpp"
 #include "classdescriptions.hpp"
 #include "ui/MainMenu.hpp"
+#include "ui/GameUI.hpp"
+#include "ui/Frame.hpp"
 #include "interface/consolecommand.hpp"
 #ifdef USE_PLAYFAB
 #include "playfab.hpp"
@@ -1676,6 +1678,250 @@ Entity* Player::Ghost_t::respawn()
 		player.ghost.reset();
 	}
 	return nullptr;
+}
+
+// Clears what a death left on this machine for a local player: the death camera, the
+// ghost and the game over window. Used when the player is revived mid-floor.
+void clearLocalPlayerDeathState(const int player)
+{
+	if ( player < 0 || player >= MAXPLAYERS || !players[player]->isLocalPlayer() )
+	{
+		return;
+	}
+	node_t* nextnode = nullptr;
+	for ( node_t* node = map.entities->first; node; node = nextnode )
+	{
+		nextnode = node->next;
+		Entity* entity = (Entity*)node->element;
+		if ( entity && entity->behavior == &actDeathCam && entity->skill[2] == player )
+		{
+			list_RemoveNode(entity->mynode);
+		}
+	}
+	if ( players[player]->ghost.my )
+	{
+		players[player]->ghost.setActive(false);
+		list_RemoveNode(players[player]->ghost.my->mynode);
+		players[player]->ghost.my = nullptr;
+	}
+	players[player]->ghost.reset();
+	if ( gameUIFrame[player] )
+	{
+		for ( auto frame : gameUIFrame[player]->getFrames() )
+		{
+			if ( !strcmp(frame->getName(), "gameover") )
+			{
+				frame->removeSelf();
+			}
+		}
+	}
+	players[player]->bControlEnabled = true;
+
+#ifdef SOUND
+	// Undo the death's music changes. The game over music only plays once every local player
+	// is dead, so only hand back to the level music if nobody else here was alive.
+	fadein_increment = default_fadein_increment;
+	fadeout_increment = default_fadeout_increment;
+	bool otherLocalPlayerAlive = false;
+	for ( int c = 0; c < MAXPLAYERS; ++c )
+	{
+		if ( c != player && players[c]->isLocalPlayer() && !client_disconnected[c] && stats[c]->HP > 0 )
+		{
+			otherLocalPlayerAlive = true;
+		}
+	}
+	if ( !otherLocalPlayerAlive )
+	{
+		levelmusicplaying = false; // the music handler picks the right track again next frame
+		combatmusicplaying = false;
+	}
+#endif
+}
+
+// Removes the items a dead player still carries, as the floor-change revive does: on death
+// they were copied into a loot bag (or onto the floor), so keeping them would duplicate them.
+void removePlayerItemsLeftOnDeath(const int player)
+{
+	Item** slots[] = {
+		&stats[player]->helmet,
+		&stats[player]->breastplate,
+		&stats[player]->gloves,
+		&stats[player]->shoes,
+		&stats[player]->shield,
+		&stats[player]->weapon,
+		&stats[player]->cloak,
+		&stats[player]->amulet,
+		&stats[player]->ring,
+		&stats[player]->mask,
+	};
+	for ( auto slot : slots )
+	{
+		if ( *slot )
+		{
+			if ( (*slot)->node )
+			{
+				list_RemoveNode((*slot)->node);
+			}
+			else
+			{
+				free(*slot);
+			}
+		}
+		*slot = nullptr;
+	}
+	node_t* nextnode = nullptr;
+	for ( node_t* node = stats[player]->inventory.first; node; node = nextnode )
+	{
+		nextnode = node->next;
+		Item* item = (Item*)node->element;
+		if ( itemCategory(item) == SPELL_CAT )
+		{
+			continue; // spells are never dropped on death
+		}
+		list_RemoveNode(node);
+	}
+}
+
+bool canRevivePlayer(const int player)
+{
+	if ( player < 0 || player >= MAXPLAYERS )
+	{
+		return false;
+	}
+	if ( client_disconnected[player] || !players[player] || !stats[player] )
+	{
+		return false;
+	}
+	// fully dead: the body is gone (not alive, and not still in the death animation)
+	return !players[player]->entity && stats[player]->HP <= 0;
+}
+
+bool revivePlayer(const int player, const real_t x, const real_t y)
+{
+	if ( multiplayer == CLIENT || !canRevivePlayer(player) )
+	{
+		return false;
+	}
+
+	// On death the player's items were copied into a loot bag, leaving the originals with
+	// them until the next floor. If the bag is unopened, take it away and let them keep the
+	// originals (still equipped); if someone opened it, the items are theirs now.
+	bool keepItems = keepInventoryGlobal;
+	if ( !keepItems )
+	{
+		const Uint32 key = stats[0]->getLootingBagKey(player);
+		for ( int i = 0; i < MAXPLAYERS && !keepItems; ++i )
+		{
+			if ( !stats[i] )
+			{
+				continue;
+			}
+			auto bag = stats[i]->player_lootbags.find(key);
+			if ( bag != stats[i]->player_lootbags.end() && !bag->second.looted )
+			{
+				keepItems = true;
+				stats[i]->player_lootbags.erase(bag);
+			}
+		}
+		if ( keepItems )
+		{
+			node_t* nextnode = nullptr;
+			for ( node_t* node = map.entities->first; node; node = nextnode )
+			{
+				nextnode = node->next;
+				Entity* entity = (Entity*)node->element;
+				if ( entity && entity->behavior == &actItem && entity->skill[10] == TOOL_PLAYER_LOOT_BAG
+					&& (Uint32)entity->skill[14] == key )
+				{
+					list_RemoveNode(entity->mynode); // also removes it on clients
+				}
+			}
+		}
+		else
+		{
+			removePlayerItemsLeftOnDeath(player);
+		}
+	}
+
+	// same recovery as surviving to the next floor
+	stats[player]->HP = stats[player]->MAXHP / 2;
+	stats[player]->MP = stats[player]->MAXMP / 2;
+	stats[player]->HUNGER = 500;
+	for ( int c = 0; c < NUMEFFECTS; ++c )
+	{
+		if ( !(c == EFF_VAMPIRICAURA && stats[player]->EFFECTS_TIMERS[c] == -2)
+			&& c != EFF_WITHDRAWAL && c != EFF_SHAPESHIFT )
+		{
+			stats[player]->clearEffect(c);
+			stats[player]->EFFECTS_TIMERS[c] = 0;
+			stats[player]->EFFECTS_ACCRETION_TIME[c] = 0;
+		}
+	}
+	serverUpdatePlayerStats();
+
+	// the host's copy of a remote player's ghost
+	if ( !players[player]->isLocalPlayer() && players[player]->ghost.my )
+	{
+		list_RemoveNode(players[player]->ghost.my->mynode);
+		players[player]->ghost.my = nullptr;
+		players[player]->ghost.reset();
+	}
+
+	// spawn on a free tile next to (x, y), falling back to (x, y) itself
+	real_t spawnX = std::floor(x / 16) * 16 + 8;
+	real_t spawnY = std::floor(y / 16) * 16 + 8;
+	static const int offsets[][2] = { {1,0}, {-1,0}, {0,1}, {0,-1}, {1,1}, {-1,1}, {1,-1}, {-1,-1} };
+	for ( auto& offset : offsets )
+	{
+		const real_t testX = spawnX + offset[0] * 16;
+		const real_t testY = spawnY + offset[1] * 16;
+		if ( !checkObstacle((long)testX, (long)testY, nullptr, nullptr) )
+		{
+			spawnX = testX;
+			spawnY = testY;
+			break;
+		}
+	}
+
+	// same setup as the REZZ handler in net.cpp
+	Entity* entity = newEntity(113, 1, map.entities, nullptr); //Player entity.
+	entity->x = spawnX;
+	entity->y = spawnY;
+	entity->new_x = entity->x;
+	entity->new_y = entity->y;
+	entity->z = -1;
+	entity->flags[INVISIBLE] = false;
+	entity->flags[GENIUS] = true;
+	entity->behavior = &actPlayer;
+	entity->skill[2] = player;
+	entity->yaw = 0.0;
+	entity->sizex = 4;
+	entity->sizey = 4;
+	entity->focalx = limbs[HUMAN][0][0]; // 0
+	entity->focaly = limbs[HUMAN][0][1]; // 0
+	entity->focalz = limbs[HUMAN][0][2]; // -1.5
+	entity->flags[UPDATENEEDED] = true;
+	entity->flags[BLOCKSIGHT] = true;
+	entity->addToCreatureList(map.creatures);
+	players[player]->entity = entity;
+
+	if ( players[player]->isLocalPlayer() )
+	{
+		clearLocalPlayerDeathState(player);
+	}
+	else if ( multiplayer == SERVER )
+	{
+		// tell the revived player's machine to leave its death screen
+		strcpy((char*)net_packet->data, "RVIV");
+		net_packet->data[4] = (Uint8)player;
+		net_packet->data[5] = keepItems ? 1 : 0;
+		net_packet->address.host = net_clients[player - 1].host;
+		net_packet->address.port = net_clients[player - 1].port;
+		net_packet->len = 6;
+		sendPacketSafe(net_sock, -1, net_packet, player - 1);
+	}
+	messagePlayer(player, MESSAGE_STATUS, Language::get(1109));
+	return true;
 }
 
 void actPlayerXP(Entity* my)

@@ -2482,3 +2482,14 @@ extern Player* players[MAXPLAYERS];
 //TODO: PLAYERSWAP
 //and fix and verify that the information is correct.
 //Then, once all have been fixed and verified, uncomment this declaration, and the accompanying definition in player.cpp; uncomment all of the TODO: PLAYERSWAP code segments, and attempt compilation and running.
+
+// Mid-floor revival (used by script mods). revivePlayer() runs on the host: it brings a dead,
+// connected player back next to (x, y) in world units with half HP/MP, keeping their items if
+// their loot bag is unopened. Returns false if the player isn't dead or this isn't the host.
+bool revivePlayer(const int player, const real_t x, const real_t y);
+// Whether revivePlayer() would accept this player: connected and fully dead (no body left).
+bool canRevivePlayer(const int player);
+// On the revived player's own machine: clears the death camera, ghost and game over window.
+void clearLocalPlayerDeathState(const int player);
+// Removes items a dead player still carries after they were dropped/bagged on death.
+void removePlayerItemsLeftOnDeath(const int player);
