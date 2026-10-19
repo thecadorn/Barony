@@ -10,6 +10,7 @@ See LICENSE for details.
 -------------------------------------------------------------------------------*/
 #include "items.hpp"
 #include "mod_tools.hpp"
+#include "scripting.hpp"
 #include "menu.hpp"
 #include "classdescriptions.hpp"
 #include "draw.hpp"
@@ -2061,6 +2062,9 @@ void ItemTooltips_t::readTooltipsFromFile(bool forceLoadBaseDirectory)
 	}
 
 	printlog("[JSON]: Successfully read %d item tooltips from '%s'", tooltips.size(), inputPath.c_str());
+#ifndef EDITOR
+	Scripting::reapplyCustomSpellTooltips(); // templates were just rebuilt
+#endif
 	/*for ( auto tmp : tagsRead )
 	{
 		printlog("%s", tmp.c_str());
@@ -3073,6 +3077,14 @@ std::string ItemTooltips_t::getCostOfSpellString(const int player, Item& item)
 node_t* ItemTooltips_t::getSpellNodeFromSpellID(int spellID)
 {
 	node_t* spellImageNode = nullptr;
+	if ( spellID >= NUM_SPELLS )
+	{
+		auto find = spellItems.find(spellID);
+		if ( find != spellItems.end() && find->second.iconSpellID >= 0 )
+		{
+			spellID = find->second.iconSpellID;
+		}
+	}
 	if ( spellID >= NUM_SPELLS || spellID < SPELL_NONE )
 	{
 		return nullptr;

@@ -54,6 +54,7 @@
 #include "ui/Text.hpp"
 #include "ui/Font.hpp"
 #include "ui/MainMenu.hpp"
+#include "scripting.hpp"
 #include "ui/Image.hpp"
 
 #ifdef STEAMWORKS
@@ -8972,6 +8973,7 @@ void doNewGame(bool makeHighscore) {
 					GenericGUI[c].assistShrineGUI.onGameStart();
 					stats[c]->clearStats();
 					initClass(c);
+					Scripting::onGameStart(c);
 				}
 				else
 				{
@@ -9002,6 +9004,7 @@ void doNewGame(bool makeHighscore) {
 			if ( !loadingsavegame && players[i]->isLocalPlayer() && !client_disconnected[i] )
 			{
 				ClassHotbarConfig_t::assignHotbarSlots(i); // assign custom hotbar configuration
+				Scripting::onBeforeGameplayStart(i); // after the hotbar layout, so mods can change it
 			}
 		}
 
@@ -9340,6 +9343,7 @@ void doNewGame(bool makeHighscore) {
 				GenericGUI[c].assistShrineGUI.onGameStart();
 				stats[c]->clearStats();
 				initClass(c);
+				Scripting::onGameStart(c);
 			}
 			mapseed = 0;
 			if ( challengeRunCustomStartLevel != "" )
@@ -9374,6 +9378,7 @@ void doNewGame(bool makeHighscore) {
 		if ( !loadingsavegame )
 		{
 			ClassHotbarConfig_t::assignHotbarSlots(clientnum); // assign custom hotbar configuration
+			Scripting::onBeforeGameplayStart(clientnum); // after the hotbar layout, so mods can change it
 		}
 
 		// stop all sounds

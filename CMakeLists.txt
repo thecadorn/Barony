@@ -632,6 +632,7 @@ if (GAME_ENABLED)
     target_link_libraries(barony ${FMOD_LIBRARY})
   endif()
   target_link_libraries(barony ${PHYSFS_LIBRARY})
+  target_link_libraries(barony barony_lua)
   if(NOT APPLE)
 	#Remember, Mac isn't using find_package for PNG.
 	target_link_libraries(barony ${PNG_LIBRARY})

@@ -14,6 +14,7 @@
 #include "../stat.hpp"
 #include "magic.hpp"
 #include "../mod_tools.hpp"
+#include "../scripting.hpp"
 
 std::map<int, spell_t*> allGameSpells;
 std::map<int, std::map<int, int>> spellTomeAppearanceToID;
@@ -3535,6 +3536,8 @@ void setupSpells()   ///TODO: Verify this function.
 			}
 		}
 	}
+
+	Scripting::reapplyCustomSpells(); // script-defined spells live in the tables we just rebuilt
 }
 
 spell_t* createSimpleSpell(int spellID, int difficulty, int mana, int base_mana, int overload_mult, int damage, 

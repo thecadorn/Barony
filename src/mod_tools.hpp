@@ -2797,6 +2797,7 @@ private:
 		Sint32 spellbookId = -1;
 		Sint32 magicstaffId = -1;
 		Sint32 fociId = -1;
+		Sint32 iconSpellID = -1; // script-defined spells (ID >= NUM_SPELLS) borrow this spell's icon
 		std::vector<std::string> spellTagsStr;
 		std::set<SpellTagTypes> spellTags;
 		std::vector<std::string> spellFormatTags;
