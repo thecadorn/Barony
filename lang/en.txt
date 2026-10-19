@@ -7270,5 +7270,14 @@ has been unlocked!#
 6996 Mouse Events Limit#
 6997 Limits the amount of mouse movement events processed per frame to prevent large camera swings.#
 6998 Unlimited#
+6999 Script
+Mods#
+7000 Loading script mods...#
+7001 No folders with a main.lua found in /scripts/ directory.#
+7002 Running#
+7003 Errors, see log.txt#
+7004 Turned off#
+7005 Loads on start#
+7006 by %s#
 
 7999 END#

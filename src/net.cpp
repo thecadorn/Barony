@@ -36,6 +36,7 @@
 #include "colors.hpp"
 #include "mod_tools.hpp"
 #include "lobbies.hpp"
+#include "scripting.hpp"
 #include "ui/MainMenu.hpp"
 #include "ui/LoadingScreen.hpp"
 #include "ui/GameUI.hpp"
@@ -2636,6 +2637,7 @@ static void changeLevel() {
 	{
 		messagePlayer(clientnum, MESSAGE_HINT, Language::get(2599));
 	}
+	Scripting::requestSharedValues(); // catch up on any shared value changes missed while loading
 	fadeout = false;
 	fadealpha = 255;
 }
@@ -5276,6 +5278,11 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 			stats[i]->MAXMP = buffer & 0xFFFF;
 			stats[i]->MP = (buffer >> 16) & 0xFFFF;
 		}
+	}},
+
+	// a script mod's shared value changed on the host
+	{'SHRD', [](){
+		Scripting::receiveSharedValue();
 	}},
 
 	// the host revived our dead player mid-floor (see revivePlayer())
@@ -8657,6 +8664,15 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			{
 				castSpell(players[player]->entity->getUID(), thespell, false, false, spellbookCast);
 			}
+		}
+	}},
+
+	// the client wants every script mod shared value
+	{'SHRQ', [](){
+		const int player = net_packet->data[4];
+		if ( player > 0 && player < MAXPLAYERS )
+		{
+			Scripting::sendSharedValues(player);
 		}
 	}},
 

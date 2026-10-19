@@ -22,6 +22,7 @@
 
 #include <fstream>
 #include <optional>
+#include <set>
 #include <sstream>
 
 // NOTE: Lua is compiled as C and reports errors with longjmp. Inside any lua_CFunction
@@ -41,6 +42,7 @@ namespace Scripting
 		{
 			std::string name;
 			int env = LUA_NOREF; // registry ref to this mod's sandboxed _ENV table
+			bool hadError = false;
 		};
 
 		struct Callback
@@ -59,6 +61,13 @@ namespace Scripting
 		std::vector<Callback> onBeforeSpellCastCallbacks;
 		std::vector<Callback> onGameStartCallbacks;
 		std::vector<Callback> onBeforeGameplayStartCallbacks;
+		std::vector<Callback> onFloorChangeCallbacks;
+		struct SharedChangeCallback
+		{
+			std::string name; // the shared value it watches
+			Callback cb;
+		};
+		std::vector<SharedChangeCallback> onSharedChangeCallbacks;
 
 		// A spell defined by a script: a clone of an existing spell with a new ID and tweaks.
 		struct CustomSpell
@@ -79,17 +88,60 @@ namespace Scripting
 		std::vector<CustomSpell> customSpells; // customSpells[i] has ID kCustomSpellIDStart + i
 		bool registrationOpen = false;         // spells can only be defined while scripts initialize
 
+		// Folder names turned off in the mods menu. A function-local static, since the menu's
+		// settings read it while static objects are still being constructed.
+		std::set<std::string>& disabledModNames()
+		{
+			static std::set<std::string> names;
+			return names;
+		}
+
 		// Shared values: named numbers for game-wide state such as a party's resurrection
 		// charges. They belong to the current run: cleared when a new run starts, stored in
 		// the save game and restored on load.
 		//
-		// They live on the host only, which is enough while only host-side code reads them
-		// (onSpellCast). To let clients read them too (e.g. to refuse a cast up front, or to
-		// show a value in the UI), the host would send a packet ("SHRD": name + value) to every
-		// client whenever setShared() changes a value, plus a full snapshot when a client joins
-		// or a level loads; clients would store the received values in this same map and
-		// getShared() would stop being host-only.
+		// Only the host changes them. It sends each change to the clients ("SHRD": name + value),
+		// and sends them all to a client that asks ("SHRQ") after starting a run or loading a
+		// level. Clients keep the received values in this same map, so on a client getShared()
+		// returns the host's value as of the last update, which can briefly be out of date.
 		std::map<std::string, lua_Number> sharedValues;
+		constexpr size_t kMaxSharedNameLength = 64;
+
+		// Lines of text script mods show on every local player's HUD (barony.setHudText), in the
+		// order they were added. Local to this machine and never saved.
+		struct HudLine
+		{
+			size_t mod;
+			std::string id;
+			std::string text;
+		};
+		std::vector<HudLine> hudLines;
+		constexpr size_t kMaxHudIdLength = 64;
+
+		// host: sends one shared value to a remote client; a null value means it was removed
+		void sendSharedValue(int player, const char* name, const lua_Number* value)
+		{
+			if ( multiplayer != SERVER || player <= 0 || player >= MAXPLAYERS
+				|| client_disconnected[player] || players[player]->isLocalPlayer() )
+			{
+				return;
+			}
+			char text[32] = "";
+			if ( value )
+			{
+				snprintf(text, sizeof(text), "%.17g", (double)*value);
+			}
+			const size_t textLength = strlen(text) + 1;
+			const size_t nameLength = strlen(name) + 1; // names are at most 64 characters
+			memcpy(net_packet->data, "SHRD", 4);
+			net_packet->data[4] = value ? 0 : 1; // 1: the value was removed
+			memcpy(&net_packet->data[5], text, textLength);
+			memcpy(&net_packet->data[5 + textLength], name, nameLength);
+			net_packet->len = 5 + textLength + nameLength;
+			net_packet->address.host = net_clients[player - 1].host;
+			net_packet->address.port = net_clients[player - 1].port;
+			sendPacketSafe(net_sock, -1, net_packet, player - 1);
+		}
 
 		void* sandboxAlloc(void*, void* ptr, size_t osize, size_t nsize)
 		{
@@ -159,6 +211,7 @@ namespace Scripting
 			if ( status != LUA_OK )
 			{
 				printlog("[Lua:%s] error in %s: %s", mods[mod].name.c_str(), what, lua_tostring(L, -1));
+				mods[mod].hadError = true;
 				lua_pop(L, 1);
 				return false;
 			}
@@ -214,6 +267,9 @@ namespace Scripting
 
 		// barony.onBeforeSpellCast(fn): fn(spellName, player) runs before a spell's cost is paid.
 		// Returning false (optionally followed by a message for the caster) rejects the cast.
+		// It runs on the caster's machine before the cast animation, then on the host once the
+		// animation is done, so fn should only check things. On a client, shared values can be
+		// slightly out of date and only the host can change them; the host's check decides.
 		int api_onBeforeSpellCast(lua_State* L)
 		{
 			addCallback(onBeforeSpellCastCallbacks, L);
@@ -363,6 +419,27 @@ namespace Scripting
 			ItemTooltips.spellNameStringToSpellID[cs.internalName] = cs.id;
 			applyCustomSpellTooltips(cs);
 			return true;
+		}
+
+		// Undoes applyCustomSpell, for when script mods are unloaded on the main menu.
+		void removeCustomSpell(const CustomSpell& cs)
+		{
+			auto spell = allGameSpells.find(cs.id);
+			if ( spell != allGameSpells.end() )
+			{
+				list_RemoveNode(spell->second->sustain_node);
+				list_FreeAll(&spell->second->elements);
+				if ( spell->second->needsDataFreed )
+				{
+					free(spell->second);
+				}
+				allGameSpells.erase(spell);
+			}
+			ItemTooltips.spellItems.erase(cs.id);
+			ItemTooltips.spellNameStringToSpellID.erase(cs.internalName);
+			ItemTooltips.templates.erase("template_icon_" + cs.internalName);
+			ItemTooltips.templates.erase("template_desc_" + cs.internalName);
+			ItemTooltips.tooltips["tooltip_spell_item"].minWidths.erase(cs.internalName);
 		}
 
 		// Validates and creates a custom spell. Returns its ID, or SPELL_NONE with `error` set.
@@ -979,10 +1056,18 @@ namespace Scripting
 			return 0;
 		}
 
+		// barony.onFloorChange(fn): fn(floor, previousFloor) runs on the host when the party
+		// arrives on a floor, before the game saves. Floors are numbered as the game shows them.
+		int api_onFloorChange(lua_State* L)
+		{
+			addCallback(onFloorChangeCallbacks, L);
+			return 0;
+		}
+
 		bool isValidSharedName(const char* name)
 		{
 			const size_t length = strlen(name);
-			if ( length == 0 || length > 64 )
+			if ( length == 0 || length > kMaxSharedNameLength )
 			{
 				return false;
 			}
@@ -996,36 +1081,126 @@ namespace Scripting
 			return true;
 		}
 
-		bool checkSharedAccess(lua_State* L, const char* function)
+		// Shared values are stored as floats; whole numbers go to Lua as integers so that they
+		// print as "3", not "3.0".
+		void pushSharedValue(lua_State* L, lua_Number value)
+		{
+			lua_Integer integer;
+			if ( lua_numbertointeger(value, &integer) && (lua_Number)integer == value )
+			{
+				lua_pushinteger(L, integer);
+			}
+			else
+			{
+				lua_pushnumber(L, value);
+			}
+		}
+
+		// Every change to this machine's shared values goes through here: stores the value (or
+		// removes it, for a null value) and, if that changed anything, sends the change to the
+		// clients (host only) and runs the onSharedChange callbacks for it.
+		void changeSharedValue(const char* nameIn, const lua_Number* valueIn)
+		{
+			// copies, since the name can point into net_packet and callbacks can send packets
+			char name[kMaxSharedNameLength + 1];
+			snprintf(name, sizeof(name), "%s", nameIn);
+			const bool removed = valueIn == nullptr;
+			const lua_Number value = removed ? 0 : *valueIn;
+
+			auto find = sharedValues.find(name);
+			if ( removed )
+			{
+				if ( find == sharedValues.end() )
+				{
+					return;
+				}
+				sharedValues.erase(find);
+			}
+			else
+			{
+				if ( find != sharedValues.end() && find->second == value )
+				{
+					return;
+				}
+				sharedValues[name] = value;
+			}
+
+			for ( int c = 1; c < MAXPLAYERS; ++c )
+			{
+				sendSharedValue(c, name, removed ? nullptr : &value);
+			}
+
+			if ( !L )
+			{
+				return;
+			}
+			// by index, since a callback may register more callbacks
+			for ( size_t i = 0; i < onSharedChangeCallbacks.size(); ++i )
+			{
+				if ( onSharedChangeCallbacks[i].name != name )
+				{
+					continue;
+				}
+				const Callback cb = onSharedChangeCallbacks[i].cb;
+				lua_rawgeti(L, LUA_REGISTRYINDEX, cb.fn);
+				if ( removed )
+				{
+					lua_pushnil(L);
+				}
+				else
+				{
+					pushSharedValue(L, value);
+				}
+				protectedCall(cb.mod, 1, 0, "onSharedChange");
+			}
+		}
+
+		void checkSharedName(lua_State* L)
+		{
+			const char* name = luaL_checkstring(L, 1);
+			luaL_argcheck(L, isValidSharedName(name), 1, "name must be 1-64 letters, digits or _");
+		}
+
+		// barony.setShared(name, value): stores a number (or nil to remove it) and sends it to
+		// the clients. Host only.
+		int api_setShared(lua_State* L)
 		{
 			if ( multiplayer == CLIENT )
 			{
-				luaL_error(L, "barony.%s is host-only (shared values aren't sent to clients yet)", function);
+				return luaL_error(L, "barony.setShared is host-only");
 			}
-			const char* name = luaL_checkstring(L, 1);
-			luaL_argcheck(L, isValidSharedName(name), 1, "name must be 1-64 letters, digits or _");
-			return true;
-		}
-
-		// barony.setShared(name, value): stores a number (or nil to remove it). Host only.
-		int api_setShared(lua_State* L)
-		{
-			checkSharedAccess(L, "setShared");
+			checkSharedName(L);
 			const char* name = lua_tostring(L, 1);
 			if ( lua_isnoneornil(L, 2) )
 			{
-				sharedValues.erase(name);
-				return 0;
+				changeSharedValue(name, nullptr);
 			}
-			const lua_Number value = luaL_checknumber(L, 2);
-			sharedValues[name] = value;
+			else
+			{
+				const lua_Number value = luaL_checknumber(L, 2);
+				changeSharedValue(name, &value);
+			}
 			return 0;
 		}
 
-		// barony.getShared(name): the stored number, or nil. Host only.
+		// barony.onSharedChange(name, fn): fn(value) runs on this machine whenever its copy of the
+		// shared value changes: setShared on the host, an update reaching a client, a save loading,
+		// or values being cleared when a run starts or ends (value is then nil).
+		int api_onSharedChange(lua_State* L)
+		{
+			checkSharedName(L);
+			luaL_checktype(L, 2, LUA_TFUNCTION);
+			lua_settop(L, 2);
+			const int fn = luaL_ref(L, LUA_REGISTRYINDEX); // pops fn
+			onSharedChangeCallbacks.push_back(SharedChangeCallback{ lua_tostring(L, 1), Callback{ modIndex(L), fn } });
+			return 0;
+		}
+
+		// barony.getShared(name): the stored number, or nil. On a client this is the host's
+		// value as of the last update received, or nil if none has arrived yet.
 		int api_getShared(lua_State* L)
 		{
-			checkSharedAccess(L, "getShared");
+			checkSharedName(L);
 			auto find = sharedValues.find(lua_tostring(L, 1));
 			if ( find == sharedValues.end() )
 			{
@@ -1033,7 +1208,7 @@ namespace Scripting
 			}
 			else
 			{
-				lua_pushnumber(L, find->second);
+				pushSharedValue(L, find->second);
 			}
 			return 1;
 		}
@@ -1054,6 +1229,44 @@ namespace Scripting
 			char line[256]; // messages are copied into fixed-size buffers and packets
 			snprintf(line, sizeof(line), "%s", text);
 			messagePlayer(player, MESSAGE_MISC, "%s", line);
+			return 0;
+		}
+
+		// barony.setHudText(id, text): shows a line of text on every local player's HUD, or
+		// removes it when text is nil. Each mod's ids are its own. Not sent to other machines.
+		int api_setHudText(lua_State* L)
+		{
+			const char* id = luaL_checkstring(L, 1);
+			const size_t idLength = strlen(id);
+			luaL_argcheck(L, idLength >= 1 && idLength <= kMaxHudIdLength, 1, "id must be 1-64 characters");
+			const char* text = luaL_optstring(L, 2, nullptr);
+			luaL_argcheck(L, !text || strlen(text) <= (size_t)kMaxHudTextLength, 2, "text must be at most 128 characters");
+
+			const size_t mod = modIndex(L);
+			size_t i = 0;
+			while ( i < hudLines.size() && !(hudLines[i].mod == mod && hudLines[i].id == id) )
+			{
+				++i;
+			}
+			if ( !text )
+			{
+				if ( i < hudLines.size() )
+				{
+					hudLines.erase(hudLines.begin() + i);
+				}
+			}
+			else if ( i < hudLines.size() )
+			{
+				hudLines[i].text = text;
+			}
+			else if ( hudLines.size() >= (size_t)kMaxHudTextLines )
+			{
+				return luaL_error(L, "the HUD can show at most %d lines from script mods", kMaxHudTextLines);
+			}
+			else
+			{
+				hudLines.push_back(HudLine{ mod, id, text });
+			}
 			return 0;
 		}
 
@@ -1109,6 +1322,9 @@ namespace Scripting
 				{ "message", api_message },
 				{ "inventory", api_inventory },
 				{ "onBeforeGameplayStart", api_onBeforeGameplayStart },
+				{ "onFloorChange", api_onFloorChange },
+				{ "onSharedChange", api_onSharedChange },
+				{ "setHudText", api_setHudText },
 				{ nullptr, nullptr },
 			};
 			lua_pushinteger(L, (lua_Integer)mod);
@@ -1157,6 +1373,7 @@ namespace Scripting
 			if ( luaL_loadbufferx(L, source.data(), source.size(), chunkname.c_str(), "t") != LUA_OK )
 			{
 				printlog("[Lua:%s] failed to load: %s", name.c_str(), lua_tostring(L, -1));
+				mods[mod].hadError = true;
 				lua_pop(L, 2); // error, env
 				return;
 			}
@@ -1202,8 +1419,7 @@ namespace Scripting
 
 		createHandleMetatables();
 
-		std::string scriptsDir = outputdir;
-		scriptsDir += "/scripts";
+		const std::string scriptsDir = scriptsDirectory();
 		DIR* dir = opendir(scriptsDir.c_str());
 		if ( !dir )
 		{
@@ -1218,6 +1434,11 @@ namespace Scripting
 		Directory directory(scriptsDir.c_str());
 		for ( const std::string& name : directory.list )
 		{
+			if ( disabledModNames().count(name) )
+			{
+				printlog("[Lua] skipped script mod '%s' (turned off in the mods menu)", name.c_str());
+				continue;
+			}
 			loadMod(name, scriptsDir + "/" + name + "/main.lua");
 		}
 		printlog("[Lua] %d script mod(s) loaded", (int)mods.size());
@@ -1237,6 +1458,10 @@ namespace Scripting
 		{
 			return;
 		}
+		for ( const CustomSpell& cs : customSpells )
+		{
+			removeCustomSpell(cs);
+		}
 		lua_close(L);
 		L = nullptr;
 		mods.clear();
@@ -1245,12 +1470,134 @@ namespace Scripting
 		onBeforeSpellCastCallbacks.clear();
 		onGameStartCallbacks.clear();
 		onBeforeGameplayStartCallbacks.clear();
+		onFloorChangeCallbacks.clear();
+		onSharedChangeCallbacks.clear();
+		hudLines.clear();
 		customSpells.clear();
+	}
+
+	std::string scriptsDirectory()
+	{
+		return std::string(outputdir) + "/scripts";
+	}
+
+	namespace
+	{
+		// "hello_world" -> "Hello World", for mods without a name in mod.json
+		std::string readableName(const std::string& folder)
+		{
+			std::string result;
+			bool startOfWord = true;
+			for ( char c : folder )
+			{
+				if ( c == '_' || c == '-' )
+				{
+					result += ' ';
+					startOfWord = true;
+					continue;
+				}
+				result += startOfWord ? (char)toupper((unsigned char)c) : c;
+				startOfWord = false;
+			}
+			return result;
+		}
+
+		// Fills in what the mods window shows from a mod's mod.json (see ModFolder).
+		void readModInfo(const std::string& path, ModFolder& folder)
+		{
+			folder.title = readableName(folder.name);
+			std::string source;
+			if ( !readFile(path, source) )
+			{
+				return; // mod.json is optional
+			}
+			rapidjson::Document d;
+			d.Parse(source.c_str());
+			if ( d.HasParseError() || !d.IsObject() )
+			{
+				printlog("[Lua:%s] mod.json is not a valid JSON object, ignoring it", folder.name.c_str());
+				return;
+			}
+			auto readString = [&d](const char* key, std::string& out) {
+				auto member = d.FindMember(key);
+				if ( member != d.MemberEnd() && member->value.IsString() && member->value.GetStringLength() > 0 )
+				{
+					out = member->value.GetString();
+				}
+			};
+			readString("name", folder.title);
+			readString("description", folder.description);
+			readString("author", folder.author);
+			readString("version", folder.version);
+			readString("icon", folder.iconSpell);
+		}
+	}
+
+	std::vector<ModFolder> listModFolders()
+	{
+		std::vector<ModFolder> result;
+		const std::string scriptsDir = scriptsDirectory();
+		DIR* dir = opendir(scriptsDir.c_str());
+		if ( !dir )
+		{
+			return result;
+		}
+		closedir(dir);
+		Directory directory(scriptsDir.c_str());
+		for ( const std::string& name : directory.list )
+		{
+			if ( !std::ifstream(scriptsDir + "/" + name + "/main.lua") )
+			{
+				continue; // not a script mod
+			}
+			ModFolder folder;
+			folder.name = name;
+			readModInfo(scriptsDir + "/" + name + "/mod.json", folder);
+			folder.enabled = !disabledModNames().count(name);
+			for ( const ScriptMod& mod : mods )
+			{
+				if ( mod.name == name )
+				{
+					folder.loaded = true;
+					folder.hadError = mod.hadError;
+					break;
+				}
+			}
+			result.push_back(folder);
+		}
+		return result;
+	}
+
+	size_t loadedModCount()
+	{
+		return mods.size();
+	}
+
+	std::vector<std::string> disabledMods()
+	{
+		return std::vector<std::string>(disabledModNames().begin(), disabledModNames().end());
+	}
+
+	void setDisabledMods(const std::vector<std::string>& names)
+	{
+		disabledModNames() = std::set<std::string>(names.begin(), names.end());
+	}
+
+	void setModEnabled(const std::string& name, bool enabled)
+	{
+		if ( enabled )
+		{
+			disabledModNames().erase(name);
+		}
+		else
+		{
+			disabledModNames().insert(name);
+		}
 	}
 
 	bool onBeforeSpellCast(spell_t* spell, int player)
 	{
-		if ( !L || !spell || multiplayer == CLIENT )
+		if ( !L || !spell )
 		{
 			return true;
 		}
@@ -1375,7 +1722,81 @@ namespace Scripting
 
 	void resetSharedValues()
 	{
-		sharedValues.clear();
+		std::vector<std::string> names; // copied, since removing them changes the map
+		for ( auto& value : sharedValues )
+		{
+			names.push_back(value.first);
+		}
+		for ( auto& name : names )
+		{
+			changeSharedValue(name.c_str(), nullptr);
+		}
+	}
+
+	void clearHudText()
+	{
+		hudLines.clear();
+	}
+
+	size_t hudTextLineCount()
+	{
+		return hudLines.size();
+	}
+
+	const char* hudTextLine(size_t index)
+	{
+		return index < hudLines.size() ? hudLines[index].text.c_str() : "";
+	}
+
+	void sendSharedValues(int player)
+	{
+		for ( auto& value : sharedValues )
+		{
+			sendSharedValue(player, value.first.c_str(), &value.second);
+		}
+	}
+
+	void receiveSharedValue()
+	{
+		if ( multiplayer != CLIENT || net_packet->len < 7 )
+		{
+			return;
+		}
+		net_packet->data[net_packet->len - 1] = 0; // the name ends the packet
+		const char* text = (const char*)&net_packet->data[5];
+		const size_t textLength = strnlen(text, net_packet->len - 5) + 1;
+		if ( 5 + textLength >= (size_t)net_packet->len )
+		{
+			return;
+		}
+		const char* name = text + textLength;
+		if ( !isValidSharedName(name) )
+		{
+			return;
+		}
+		if ( net_packet->data[4] == 1 )
+		{
+			changeSharedValue(name, nullptr);
+		}
+		else
+		{
+			const lua_Number value = (lua_Number)atof(text);
+			changeSharedValue(name, &value);
+		}
+	}
+
+	void requestSharedValues()
+	{
+		if ( multiplayer != CLIENT )
+		{
+			return;
+		}
+		memcpy(net_packet->data, "SHRQ", 4);
+		net_packet->data[4] = clientnum;
+		net_packet->len = 5;
+		net_packet->address.host = net_server.host;
+		net_packet->address.port = net_server.port;
+		sendPacketSafe(net_sock, -1, net_packet, 0);
 	}
 
 	std::vector<std::pair<std::string, std::string>> savedSharedTable()
@@ -1392,14 +1813,33 @@ namespace Scripting
 
 	void restoreSharedValues(const std::vector<std::pair<std::string, std::string>>& additionalData)
 	{
-		sharedValues.clear();
+		std::map<std::string, lua_Number> saved;
 		const size_t prefixLength = strlen(kSavedSharedKeyPrefix);
 		for ( auto& entry : additionalData )
 		{
-			if ( entry.first.compare(0, prefixLength, kSavedSharedKeyPrefix) == 0 )
+			if ( entry.first.compare(0, prefixLength, kSavedSharedKeyPrefix) == 0
+				&& isValidSharedName(entry.first.c_str() + prefixLength) )
 			{
-				sharedValues[entry.first.substr(prefixLength)] = (lua_Number)atof(entry.second.c_str());
+				saved[entry.first.substr(prefixLength)] = (lua_Number)atof(entry.second.c_str());
 			}
+		}
+
+		// go through changeSharedValue so mods hear about the values the save changes
+		std::vector<std::string> removed;
+		for ( auto& value : sharedValues )
+		{
+			if ( saved.find(value.first) == saved.end() )
+			{
+				removed.push_back(value.first);
+			}
+		}
+		for ( auto& name : removed )
+		{
+			changeSharedValue(name.c_str(), nullptr);
+		}
+		for ( auto& value : saved )
+		{
+			changeSharedValue(value.first.c_str(), &value.second);
 		}
 	}
 
@@ -1438,6 +1878,22 @@ namespace Scripting
 			lua_rawgeti(L, LUA_REGISTRYINDEX, cb.fn);
 			lua_pushinteger(L, player);
 			protectedCall(cb.mod, 1, 0, "onBeforeGameplayStart");
+		}
+	}
+
+	void onFloorChange(int floor, int previousFloor)
+	{
+		if ( !L || multiplayer == CLIENT )
+		{
+			return;
+		}
+		for ( size_t i = 0; i < onFloorChangeCallbacks.size(); ++i )
+		{
+			const Callback cb = onFloorChangeCallbacks[i];
+			lua_rawgeti(L, LUA_REGISTRYINDEX, cb.fn);
+			lua_pushinteger(L, floor);
+			lua_pushinteger(L, previousFloor);
+			protectedCall(cb.mod, 2, 0, "onFloorChange");
 		}
 	}
 }

@@ -48,7 +48,20 @@ dirent.h is a POSIX header, you will need to obtain a Windows port. For example,
 
 Download everything else. You may need to build things. More explicit instructions here would be nice.
 
-### TODO: vcpkg something or other
+### Using vcpkg
+
+The quickest route is [vcpkg](https://github.com/microsoft/vcpkg), which builds every dependency above (plus GLEW, which Windows builds also need) and wires them into CMake for you. From a "Developer PowerShell for VS 2022":
+
+```
+git clone https://github.com/microsoft/vcpkg C:\vcpkg
+C:\vcpkg\bootstrap-vcpkg.bat
+C:\vcpkg\vcpkg install sdl2 sdl2-image sdl2-net sdl2-ttf libpng zlib physfs rapidjson dirent glew --triplet x64-windows
+
+cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake -DFMOD_ENABLED=OFF
+cmake --build build --config Release
+```
+
+The executables and the DLLs they need end up in `build\Release\`. Drop `-DFMOD_ENABLED=OFF` if you have the FMOD SDK installed, otherwise the game builds without sound. To build next to an existing install without overwriting its executables, add `-DGAME_EXE_NAME=barony-lua -DEDITOR_EXE_NAME=editor-lua` (or any names you like) to the first cmake command.
 
 ## Building Barony
 

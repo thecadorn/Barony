@@ -27,6 +27,7 @@
 #include "../shops.hpp"
 #include "../colors.hpp"
 #include "../book.hpp"
+#include "../scripting.hpp"
 #include "../ui/MainMenu.hpp"
 
 #include <assert.h>
@@ -12368,6 +12369,28 @@ void createGameTimerFrame(const int player)
 	seed->setDisabled(true);
 }
 
+// script mods' lines of text (barony.setHudText), stacked in the bottom right corner
+void createModTextFrame(const int player)
+{
+	auto& hud_t = players[player]->hud;
+	hud_t.modTextFrame = hud_t.hudFrame->addFrame("mod text");
+	hud_t.modTextFrame->setHollow(true);
+	hud_t.modTextFrame->setDisabled(true);
+
+	for ( int i = 0; i < Scripting::kMaxHudTextLines; ++i )
+	{
+		char name[32];
+		snprintf(name, sizeof(name), "line %d", i);
+		auto txt = hud_t.modTextFrame->addField(name, Scripting::kMaxHudTextLength + 1);
+		txt->setText("");
+		txt->setFont("fonts/pixel_maz_multiline.ttf#16#2");
+		txt->setVJustify(Field::justify_t::TOP);
+		txt->setHJustify(Field::justify_t::RIGHT);
+		txt->setColor(makeColor(255, 255, 255, 255));
+		txt->setDisabled(true);
+	}
+}
+
 void createMapPromptFrame(const int player)
 {
 	auto& hud_t = players[player]->hud;
@@ -12692,6 +12715,10 @@ void Player::HUD_t::processHUD()
 	{
 		createGameTimerFrame(player.playernum);
 	}
+	if ( !modTextFrame )
+	{
+		createModTextFrame(player.playernum);
+	}
 	if ( !xpFrame )
 	{
 		createXPBar(player.playernum);
@@ -12735,6 +12762,7 @@ void Player::HUD_t::processHUD()
 
 	updateMinimapPrompts();
 	updateGameTimer();
+	updateModTextFrame();
 	updateAllyFollowerFrame(player.playernum);
 	updateAllyPlayerFrame(player.playernum, player.hud.allyPlayerFrame);
 	updateXPBar();
@@ -31285,6 +31313,62 @@ void Player::HUD_t::updateGameTimer()
 
 	gameTimerFrame->setSize(pos);
 	timerText->setText(buf);
+}
+
+void Player::HUD_t::updateModTextFrame()
+{
+	if ( !modTextFrame )
+	{
+		return;
+	}
+
+	const int count = std::min((int)Scripting::hudTextLineCount(), Scripting::kMaxHudTextLines);
+	if ( count == 0 || !player.shootmode )
+	{
+		modTextFrame->setDisabled(true);
+		return;
+	}
+	modTextFrame->setDisabled(false);
+
+	// stack upwards from above whatever already sits in the bottom right corner: the map
+	// prompts, and the minimap above them while it's docked there (not the big centered map)
+	const SDL_Rect hudSize = hudFrame->getSize();
+	int bottom = hudSize.h - offsetHUDAboveHotbarHeight;
+	if ( mapPromptFrame && !mapPromptFrame->isDisabled() )
+	{
+		bottom = std::min(bottom, mapPromptFrame->getSize().y);
+	}
+	if ( minimapFrame && !minimapFrame->isInvisible() )
+	{
+		const SDL_Rect mapPos = minimapFrame->getSize();
+		if ( mapPos.w > 0 && mapPos.x + mapPos.w >= hudSize.w - 16 )
+		{
+			bottom = std::min(bottom, mapPos.y);
+		}
+	}
+
+	const int lineHeight = 22;
+	const int width = hudSize.w / 2;
+	modTextFrame->setSize(SDL_Rect{ hudSize.w - width - 8, bottom - 4 - count * lineHeight, width, count * lineHeight });
+
+	for ( int i = 0; i < Scripting::kMaxHudTextLines; ++i )
+	{
+		char name[32];
+		snprintf(name, sizeof(name), "line %d", i);
+		Field* txt = modTextFrame->findField(name);
+		if ( !txt )
+		{
+			continue;
+		}
+		if ( i >= count )
+		{
+			txt->setDisabled(true);
+			continue;
+		}
+		txt->setDisabled(false);
+		txt->setSize(SDL_Rect{ 0, i * lineHeight, width, lineHeight });
+		txt->setText(Scripting::hudTextLine(i));
+	}
 }
 
 void Player::HUD_t::updateXPBar()

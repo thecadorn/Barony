@@ -2070,6 +2070,7 @@ void gameLogic(void)
 					}
 
 					std::string prevmapname = map.name;
+					const int previousFloor = currentlevel;
 
 					bool loadingTheSameFloorAsCurrent = false;
 					if ( skipLevelsOnLoad > 0 )
@@ -2688,6 +2689,8 @@ void gameLogic(void)
 							}
 						}
 					}
+
+					Scripting::onFloorChange(currentlevel, previousFloor); // before the save, so mods' changes are kept
 
                     // save at end of level change
 					if ( gameModeManager.allowsSaves() )
@@ -7373,9 +7376,6 @@ int main(int argc, char** argv)
 			exit(c);
 		}
 		initialized = true;
-
-		// load Lua script mods
-		Scripting::init();
 
 		// initialize player conducts
 		setDefaultPlayerConducts();

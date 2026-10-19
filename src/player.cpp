@@ -7181,6 +7181,7 @@ void Player::clearGUIPointers()
 	hud.mpFrame = nullptr;
 	hud.minimapFrame = nullptr;
 	hud.gameTimerFrame = nullptr;
+	hud.modTextFrame = nullptr;
 	hud.allyStatusFrame = nullptr;
 	hud.minotaurFrame = nullptr;
 	hud.minotaurSharedDisplay = nullptr;

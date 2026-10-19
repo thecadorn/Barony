@@ -9382,6 +9382,10 @@ void doNewGame(bool makeHighscore) {
 			Scripting::onBeforeGameplayStart(clientnum); // after the hotbar layout, so mods can change it
 		}
 
+		// shared values come from the host, not from this run's start or our own save
+		Scripting::resetSharedValues();
+		Scripting::requestSharedValues();
+
 		// stop all sounds
 #ifdef USE_FMOD
 		if ( sound_group )
@@ -10388,6 +10392,10 @@ void doEndgame(bool saveHighscore, bool onServerDisconnect) {
 #ifdef LOCAL_ACHIEVEMENTS
 	LocalAchievements_t::writeToFile();
 #endif
+
+	// the run is over: mods hear their shared values go away, and their HUD text is removed
+	Scripting::resetSharedValues();
+	Scripting::clearHudText();
 }
 
 void doIntro() {

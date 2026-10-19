@@ -23,7 +23,7 @@ barony.maxPlayers = 4
 ---@param ... any
 function barony.log(...) end
 
----Registers a function to run once at game startup, after every script mod has loaded.
+---Registers a function to run once every script mod has loaded (when a modded game is started).
 ---@param callback fun()
 function barony.onInit(callback) end
 
@@ -41,8 +41,10 @@ function barony.onSpellCast(callback) end
 ---    return false, "You can't do that right now."
 ---Return nothing to allow it. Rejection stops at the first callback that rejects.
 ---`player` is the caster's player index, or nil for monsters and traps.
----Multiplayer: runs on the host (like onSpellCast), so it can read shared values. A client's
----cast animation has already played by then; only the cost and the effect are prevented.
+---Runs on the caster's machine before the cast animation, then again on the host when the
+---animation finishes, so only check things here. On a client, shared values and other
+---players' state are the host's last update and can briefly be out of date; the host's
+---check decides.
 ---@param callback fun(spellName: string, player: integer?): boolean?, string?
 function barony.onBeforeSpellCast(callback) end
 
@@ -86,6 +88,14 @@ function barony.registerSpell(def) end
 ---the hotbar: changes made in onGameStart are overwritten by the default hotbar layout.
 ---@param callback fun(player: integer)
 function barony.onBeforeGameplayStart(callback) end
+
+---Registers a function to run on the host when the party arrives on a floor, before the game
+---saves (so shared values changed here are in the save). Floors are numbered as the game
+---shows them. It also runs when going back up, entering a secret level at the same depth, or
+---reloading the same floor; compare the numbers to tell these apart. Not called when loading
+---a save.
+---@param callback fun(floor: integer, previousFloor: integer)
+function barony.onFloorChange(callback) end
 
 ---Returns a player's hotbar, or nil if that player isn't local to this machine.
 ---@param player integer
@@ -175,13 +185,14 @@ function Player:revive(x, y) end
 function barony.isHost() end
 
 ---Stores a named number for the current run, e.g. a party-wide counter. Pass nil to remove it.
----Values are cleared when a new run starts and are saved with the game.
----Host only: shared values are not sent to clients yet, so calling this on a client errors.
+---Values are cleared when a run starts or ends and are saved with the game.
+---Host only (calling this on a client errors); each change is sent to the clients.
 ---@param name string 1-64 letters, digits or _
 ---@param value number?
 function barony.setShared(name, value) end
 
----Returns a number stored with barony.setShared, or nil if it isn't set. Host only.
+---Returns a number stored with barony.setShared, or nil if it isn't set. On a client this is
+---the host's value as of the last update, or nil until the first update arrives.
 ---@param name string
 ---@return number?
 function barony.getShared(name) end
@@ -191,3 +202,20 @@ function barony.getShared(name) end
 ---@param player integer
 ---@param text string
 function barony.message(player, text) end
+
+---Shows a line of text in the bottom right of every local player's HUD, or removes it when
+---text is nil. Calling it again with the same id replaces the line; each mod's ids are its own.
+---Only affects this machine: use onSharedChange to keep it up to date everywhere.
+---At most 8 lines across all mods; they're removed when the run ends.
+---@param id string 1-64 characters
+---@param text string? up to 128 characters
+function barony.setHudText(id, text) end
+
+---Registers a function to run on this machine whenever its copy of a shared value changes:
+---setShared on the host, an update reaching a client, a save loading, or values being cleared
+---when a run starts or ends (value is then nil). It doesn't run if the value stayed the same.
+---Don't do gameplay here: it can run while a save is loading. Calling setShared on the same
+---value from inside it runs it again.
+---@param name string 1-64 letters, digits or _
+---@param callback fun(value: number?)
+function barony.onSharedChange(name, callback) end
