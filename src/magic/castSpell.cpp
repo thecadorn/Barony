@@ -26,6 +26,7 @@
 #include "../prng.hpp"
 #include "../mod_tools.hpp"
 #include "../paths.hpp"
+#include "../scripting.hpp"
 
 void castSpellInit(Uint32 caster_uid, spell_t* spell, bool usingSpellbook, bool usingTome)
 {
@@ -976,6 +977,12 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			}
 			return nullptr;
 		}
+	}
+
+	// the cast is going ahead: let script mods know, and skip the default effect if they ask
+	if ( !Scripting::onSpellCast(spell, player) )
+	{
+		return nullptr;
 	}
 
 	//Right. First, grab the root element, which is what determines the delivery system.

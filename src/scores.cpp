@@ -27,6 +27,7 @@
 #include "mod_tools.hpp"
 #include "lobbies.hpp"
 #include "shops.hpp"
+#include "scripting.hpp"
 #ifdef USE_PLAYFAB
 #include "playfab.hpp"
 #endif
@@ -6039,6 +6040,10 @@ int SaveGameInfo::populateFromSession(const int playernum)
 	{
 		info->additional_data.push_back(std::make_pair("game_scenario", gameModeManager.currentSession.challengeRun.scenarioStr));
 	}
+	for ( auto& entry : Scripting::savedSpellTable() )
+	{
+		info->additional_data.push_back(entry); // lets loading match custom spells by name
+	}
 
 
 	if ( info->game_version >= 410 )
@@ -6360,6 +6365,22 @@ int loadGame(int player, const SaveGameInfo& info) {
 		return 1;
 	}
 
+	// Script-defined spell IDs depend on the installed script mods, so map the IDs this
+	// save used to the current ones by name. Unknown IDs in the script range become SPELL_NONE.
+	const std::map<int, int> scriptSpellRemap = Scripting::savedSpellRemap(info.additional_data);
+	auto remapSpellID = [&scriptSpellRemap](int spellID) -> int {
+		if ( spellID < Scripting::kCustomSpellIDStart || spellID >= Scripting::kCustomSpellIDEnd )
+		{
+			return spellID;
+		}
+		auto find = scriptSpellRemap.find(spellID);
+		return find != scriptSpellRemap.end() ? find->second : (int)SPELL_NONE;
+	};
+	// SPELL_ITEM appearances are spell IDs, + 1000 for shapeshift variants
+	auto remapSpellItemAppearance = [&remapSpellID](Uint32 appearance) -> Uint32 {
+		return appearance >= 1000 ? (Uint32)remapSpellID((int)appearance - 1000) + 1000 : (Uint32)remapSpellID((int)appearance);
+	};
+
 	//if (info.game_version != getSavegameVersion(VERSION)) {
 	//	printlog("loadGame() failed: game version mismatch");
 	//	return 1;
@@ -6468,8 +6489,18 @@ int loadGame(int player, const SaveGameInfo& info) {
 	// read spells
 	list_FreeAll(&players[statsPlayer]->magic.spellList);
 	Uint32 spellIndex = 0;
-	for (auto& s : info.players[player].spells) {
-		spell_t* spell = copySpell(getSpellFromID(s));
+	for (auto& savedSpellID : info.players[player].spells) {
+		const int s = remapSpellID((int)savedSpellID);
+		auto known = allGameSpells.find(s); // checked first: getSpellFromID asserts on unknown IDs
+		spell_t* savedSpell = known != allGameSpells.end() ? known->second : nullptr;
+		if ( !savedSpell )
+		{
+			// e.g. a script-defined spell whose mod is no longer installed
+			printlog("[SAVE]: skipping unknown spell %d", (int)s);
+			++spellIndex;
+			continue;
+		}
+		spell_t* spell = copySpell(savedSpell);
 		node_t* node = list_AddNodeLast(&players[statsPlayer]->magic.spellList);
 		node->element = spell;
 		node->deconstructor = &spellDeconstructor;
@@ -6489,7 +6520,7 @@ int loadGame(int player, const SaveGameInfo& info) {
 
 		++spellIndex;
 	}
-	players[statsPlayer]->magic.selected_spell_last_appearance = info.players[player].selected_spell_last_appearance;
+	players[statsPlayer]->magic.selected_spell_last_appearance = remapSpellItemAppearance(info.players[player].selected_spell_last_appearance);
 
 	// read alchemy recipes
 	clientLearnedAlchemyRecipes[statsPlayer].clear();
@@ -6599,7 +6630,7 @@ int loadGame(int player, const SaveGameInfo& info) {
 		Status status = static_cast<Status>(item.status);
 		Sint16 beatitude = item.beatitude;
 		Sint16 count = item.count;
-		Uint32 appearance = item.appearance;
+		Uint32 appearance = type == SPELL_ITEM ? remapSpellItemAppearance(item.appearance) : item.appearance;
 		bool identified = item.identified;
 		Item* i = newItem(type, status, beatitude, count,
 			appearance, identified, &stats[statsPlayer]->inventory);
@@ -6709,6 +6740,42 @@ int loadGame(int player, const SaveGameInfo& info) {
 		}
 	}
 
+	// Drop learned-spell items whose spell no longer exists (its script mod was removed).
+	// Done after the hotbar is restored, because the save refers to hotbar items by inventory index.
+	node_t* nextInventoryNode = nullptr;
+	for ( node_t* node = stats[statsPlayer]->inventory.first; node; node = nextInventoryNode )
+	{
+		nextInventoryNode = node->next;
+		Item* item = (Item*)node->element;
+		if ( !item || item->type != SPELL_ITEM )
+		{
+			continue;
+		}
+		const int spellID = item->appearance >= 1000 ? (int)item->appearance - 1000 : (int)item->appearance;
+		if ( allGameSpells.find(spellID) != allGameSpells.end() )
+		{
+			continue;
+		}
+		printlog("[SAVE]: removing item for unknown spell %d", spellID);
+		for ( int c = 0; c < NUM_HOTBAR_SLOTS; ++c )
+		{
+			if ( hotbar[c].item == item->uid )
+			{
+				hotbar[c].item = 0;
+				hotbar[c].resetLastItem();
+			}
+			for ( int d = 0; d < NUM_HOTBAR_ALTERNATES; ++d )
+			{
+				if ( hotbar_alternate[d][c].item == item->uid )
+				{
+					hotbar_alternate[d][c].item = 0;
+					hotbar_alternate[d][c].resetLastItem();
+				}
+			}
+		}
+		list_RemoveNode(node);
+	}
+
 	// reset certain variables
 	list_FreeAll(&stats[statsPlayer]->FOLLOWERS);
 	stats[statsPlayer]->monster_sound = nullptr;
@@ -6805,8 +6872,13 @@ int loadGame(int player, const SaveGameInfo& info) {
 		{
 			mechanics.itemDegradeRng[pair.first] = pair.second;
 		}
-		for ( auto learnedSpell : info.players[player].learnedSpells )
+		for ( auto savedLearnedSpell : info.players[player].learnedSpells )
 		{
+			const int learnedSpell = remapSpellID(savedLearnedSpell);
+			if ( learnedSpell == SPELL_NONE )
+			{
+				continue;
+			}
 			mechanics.learnedSpells.insert(learnedSpell);
 		}
 		for ( auto& duck : info.players[player].ducksInARow )
@@ -6819,7 +6891,12 @@ int loadGame(int player, const SaveGameInfo& info) {
 		}
 		for ( auto& pair : info.players[player].sustainedSpellIDCounter )
 		{
-			mechanics.sustainedSpellIDCounter[pair.first] = pair.second;
+			const int spellID = remapSpellID(pair.first);
+			if ( spellID == SPELL_NONE )
+			{
+				continue;
+			}
+			mechanics.sustainedSpellIDCounter[spellID] = pair.second;
 		}
 		for ( auto& pair : info.players[player].escalatingRngRolls )
 		{

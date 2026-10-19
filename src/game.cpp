@@ -52,6 +52,7 @@
 #include "ui/Image.hpp"
 #include "ui/MainMenu.hpp"
 #include "ui/LoadingScreen.hpp"
+#include "scripting.hpp"
 
 #include "UnicodeDecoder.h"
 
@@ -7373,6 +7374,9 @@ int main(int argc, char** argv)
 		}
 		initialized = true;
 
+		// load Lua script mods
+		Scripting::init();
+
 		// initialize player conducts
 		setDefaultPlayerConducts();
 
@@ -8257,6 +8261,7 @@ int main(int argc, char** argv)
 		(void)MainMenu::settingsSave();
 
 		// deinit
+		Scripting::deinit();
 		deinitGame();
 		return deinitApp();
 	}
