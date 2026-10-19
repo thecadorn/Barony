@@ -1,0 +1,6 @@
+{
+	"name": "Sunburst",
+	"description": "A new spell, built on Light, that permanently raises the caster's max HP.",
+	"version": "1.0",
+	"icon": "spell_light"
+}

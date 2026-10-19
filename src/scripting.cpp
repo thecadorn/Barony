@@ -22,6 +22,7 @@
 
 #include <fstream>
 #include <optional>
+#include <set>
 #include <sstream>
 
 // NOTE: Lua is compiled as C and reports errors with longjmp. Inside any lua_CFunction
@@ -41,6 +42,7 @@ namespace Scripting
 		{
 			std::string name;
 			int env = LUA_NOREF; // registry ref to this mod's sandboxed _ENV table
+			bool hadError = false;
 		};
 
 		struct Callback
@@ -85,6 +87,14 @@ namespace Scripting
 		};
 		std::vector<CustomSpell> customSpells; // customSpells[i] has ID kCustomSpellIDStart + i
 		bool registrationOpen = false;         // spells can only be defined while scripts initialize
+
+		// Folder names turned off in the mods menu. A function-local static, since the menu's
+		// settings read it while static objects are still being constructed.
+		std::set<std::string>& disabledModNames()
+		{
+			static std::set<std::string> names;
+			return names;
+		}
 
 		// Shared values: named numbers for game-wide state such as a party's resurrection
 		// charges. They belong to the current run: cleared when a new run starts, stored in
@@ -201,6 +211,7 @@ namespace Scripting
 			if ( status != LUA_OK )
 			{
 				printlog("[Lua:%s] error in %s: %s", mods[mod].name.c_str(), what, lua_tostring(L, -1));
+				mods[mod].hadError = true;
 				lua_pop(L, 1);
 				return false;
 			}
@@ -408,6 +419,27 @@ namespace Scripting
 			ItemTooltips.spellNameStringToSpellID[cs.internalName] = cs.id;
 			applyCustomSpellTooltips(cs);
 			return true;
+		}
+
+		// Undoes applyCustomSpell, for when script mods are unloaded on the main menu.
+		void removeCustomSpell(const CustomSpell& cs)
+		{
+			auto spell = allGameSpells.find(cs.id);
+			if ( spell != allGameSpells.end() )
+			{
+				list_RemoveNode(spell->second->sustain_node);
+				list_FreeAll(&spell->second->elements);
+				if ( spell->second->needsDataFreed )
+				{
+					free(spell->second);
+				}
+				allGameSpells.erase(spell);
+			}
+			ItemTooltips.spellItems.erase(cs.id);
+			ItemTooltips.spellNameStringToSpellID.erase(cs.internalName);
+			ItemTooltips.templates.erase("template_icon_" + cs.internalName);
+			ItemTooltips.templates.erase("template_desc_" + cs.internalName);
+			ItemTooltips.tooltips["tooltip_spell_item"].minWidths.erase(cs.internalName);
 		}
 
 		// Validates and creates a custom spell. Returns its ID, or SPELL_NONE with `error` set.
@@ -1341,6 +1373,7 @@ namespace Scripting
 			if ( luaL_loadbufferx(L, source.data(), source.size(), chunkname.c_str(), "t") != LUA_OK )
 			{
 				printlog("[Lua:%s] failed to load: %s", name.c_str(), lua_tostring(L, -1));
+				mods[mod].hadError = true;
 				lua_pop(L, 2); // error, env
 				return;
 			}
@@ -1386,8 +1419,7 @@ namespace Scripting
 
 		createHandleMetatables();
 
-		std::string scriptsDir = outputdir;
-		scriptsDir += "/scripts";
+		const std::string scriptsDir = scriptsDirectory();
 		DIR* dir = opendir(scriptsDir.c_str());
 		if ( !dir )
 		{
@@ -1402,6 +1434,11 @@ namespace Scripting
 		Directory directory(scriptsDir.c_str());
 		for ( const std::string& name : directory.list )
 		{
+			if ( disabledModNames().count(name) )
+			{
+				printlog("[Lua] skipped script mod '%s' (turned off in the mods menu)", name.c_str());
+				continue;
+			}
 			loadMod(name, scriptsDir + "/" + name + "/main.lua");
 		}
 		printlog("[Lua] %d script mod(s) loaded", (int)mods.size());
@@ -1421,6 +1458,10 @@ namespace Scripting
 		{
 			return;
 		}
+		for ( const CustomSpell& cs : customSpells )
+		{
+			removeCustomSpell(cs);
+		}
 		lua_close(L);
 		L = nullptr;
 		mods.clear();
@@ -1433,6 +1474,125 @@ namespace Scripting
 		onSharedChangeCallbacks.clear();
 		hudLines.clear();
 		customSpells.clear();
+	}
+
+	std::string scriptsDirectory()
+	{
+		return std::string(outputdir) + "/scripts";
+	}
+
+	namespace
+	{
+		// "hello_world" -> "Hello World", for mods without a name in mod.json
+		std::string readableName(const std::string& folder)
+		{
+			std::string result;
+			bool startOfWord = true;
+			for ( char c : folder )
+			{
+				if ( c == '_' || c == '-' )
+				{
+					result += ' ';
+					startOfWord = true;
+					continue;
+				}
+				result += startOfWord ? (char)toupper((unsigned char)c) : c;
+				startOfWord = false;
+			}
+			return result;
+		}
+
+		// Fills in what the mods window shows from a mod's mod.json (see ModFolder).
+		void readModInfo(const std::string& path, ModFolder& folder)
+		{
+			folder.title = readableName(folder.name);
+			std::string source;
+			if ( !readFile(path, source) )
+			{
+				return; // mod.json is optional
+			}
+			rapidjson::Document d;
+			d.Parse(source.c_str());
+			if ( d.HasParseError() || !d.IsObject() )
+			{
+				printlog("[Lua:%s] mod.json is not a valid JSON object, ignoring it", folder.name.c_str());
+				return;
+			}
+			auto readString = [&d](const char* key, std::string& out) {
+				auto member = d.FindMember(key);
+				if ( member != d.MemberEnd() && member->value.IsString() && member->value.GetStringLength() > 0 )
+				{
+					out = member->value.GetString();
+				}
+			};
+			readString("name", folder.title);
+			readString("description", folder.description);
+			readString("author", folder.author);
+			readString("version", folder.version);
+			readString("icon", folder.iconSpell);
+		}
+	}
+
+	std::vector<ModFolder> listModFolders()
+	{
+		std::vector<ModFolder> result;
+		const std::string scriptsDir = scriptsDirectory();
+		DIR* dir = opendir(scriptsDir.c_str());
+		if ( !dir )
+		{
+			return result;
+		}
+		closedir(dir);
+		Directory directory(scriptsDir.c_str());
+		for ( const std::string& name : directory.list )
+		{
+			if ( !std::ifstream(scriptsDir + "/" + name + "/main.lua") )
+			{
+				continue; // not a script mod
+			}
+			ModFolder folder;
+			folder.name = name;
+			readModInfo(scriptsDir + "/" + name + "/mod.json", folder);
+			folder.enabled = !disabledModNames().count(name);
+			for ( const ScriptMod& mod : mods )
+			{
+				if ( mod.name == name )
+				{
+					folder.loaded = true;
+					folder.hadError = mod.hadError;
+					break;
+				}
+			}
+			result.push_back(folder);
+		}
+		return result;
+	}
+
+	size_t loadedModCount()
+	{
+		return mods.size();
+	}
+
+	std::vector<std::string> disabledMods()
+	{
+		return std::vector<std::string>(disabledModNames().begin(), disabledModNames().end());
+	}
+
+	void setDisabledMods(const std::vector<std::string>& names)
+	{
+		disabledModNames() = std::set<std::string>(names.begin(), names.end());
+	}
+
+	void setModEnabled(const std::string& name, bool enabled)
+	{
+		if ( enabled )
+		{
+			disabledModNames().erase(name);
+		}
+		else
+		{
+			disabledModNames().insert(name);
+		}
 	}
 
 	bool onBeforeSpellCast(spell_t* spell, int player)

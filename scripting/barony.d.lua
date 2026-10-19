@@ -23,7 +23,7 @@ barony.maxPlayers = 4
 ---@param ... any
 function barony.log(...) end
 
----Registers a function to run once at game startup, after every script mod has loaded.
+---Registers a function to run once every script mod has loaded (when a modded game is started).
 ---@param callback fun()
 function barony.onInit(callback) end
 

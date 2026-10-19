@@ -26,6 +26,7 @@
 #include "../colors.hpp"
 #include "../book.hpp"
 #include "../scrolls.hpp"
+#include "../scripting.hpp"
 
 #include <cassert>
 #include <functional>
@@ -589,6 +590,7 @@ namespace MainMenu {
     // All menu options combined
 	struct AllSettings {
 	    std::vector<std::pair<std::string, std::string>> mods = Mods::mountedFilepathsSaved;
+	    std::vector<std::string> disabled_script_mods = Scripting::disabledMods();
 	    bool crossplay_enabled = LobbyHandler.crossplayEnabled;
 	    bool fast_restart = false;
 		float world_tooltip_scale = 100.f;
@@ -2887,6 +2889,7 @@ namespace MainMenu {
 	inline int AllSettings::save() {
         int result = VideoRefresh::None;
 		Mods::mountedFilepathsSaved = mods;
+		Scripting::setDisabledMods(disabled_script_mods);
 		*cvar_fastRestart = fast_restart;
 		*cvar_worldtooltip_scale = world_tooltip_scale;
 		*cvar_worldtooltip_scale_splitscreen = world_tooltip_scale_splitscreen;
@@ -3033,6 +3036,7 @@ namespace MainMenu {
 	inline AllSettings AllSettings::load(bool video) {
 		AllSettings settings;
 		settings.mods = Mods::mountedFilepathsSaved;
+		settings.disabled_script_mods = Scripting::disabledMods();
 		settings.crossplay_enabled = LobbyHandler.crossplayEnabled;
 		settings.fast_restart = *cvar_fastRestart;
 		settings.world_tooltip_scale = *cvar_worldtooltip_scale;
@@ -3134,9 +3138,10 @@ namespace MainMenu {
 	}
 
 	bool AllSettings::serialize(FileInterface* file) {
-	    int version = 25;
+	    int version = 26;
 	    file->property("version", version);
 	    file->property("mods", mods);
+		file->propertyVersion("disabled_script_mods", version >= 26, disabled_script_mods);
 		file->property("crossplay_enabled", crossplay_enabled);
 		file->propertyVersion("fast_restart", version >= 2, fast_restart);
 		file->property("add_items_to_hotbar_enabled", add_items_to_hotbar_enabled);
@@ -24947,6 +24952,7 @@ failed:
 		soundActivate();
 		gui->deselect();
 		Mods::unloadMods();
+		Scripting::deinit(); // script mods only run in a modded game
 		destroyMainMenu();
 		createMainMenu(false);
 	}
@@ -28459,6 +28465,34 @@ failed:
 
 	static std::string mods_active_tab = "";
 	static Uint32 mods_loading_tick = 0;
+
+	// The script mods tab's text, with English fallbacks for an install whose lang/en.txt
+	// predates it (Language::get() returns "" for missing lines).
+	static const char* langOr(int line, const char* fallback)
+	{
+		const char* text = Language::get(line);
+		return (text && text[0]) ? text : fallback;
+	}
+
+	static std::string truncated(const std::string& str, size_t maxLength)
+	{
+		return str.size() > maxLength ? str.substr(0, maxLength) + "..." : str;
+	}
+
+	// script mods that will load when a modded game starts
+	static int enabledScriptModCount()
+	{
+		int count = 0;
+		for ( auto& mod : Scripting::listModFolders() )
+		{
+			count += mod.enabled ? 1 : 0;
+		}
+		return count;
+	}
+
+	// enabledScriptModCount() for the mods window's per-frame status, which shouldn't read the
+	// scripts folder every frame. Updated when the window opens and when a script mod is toggled.
+	static int chosenScriptModCount = 0;
 #ifdef STEAMWORKS
 	static void createWorkshopCreateMenu(SteamUGCDetails_t* details);
 #endif
@@ -28466,7 +28500,8 @@ failed:
 	{
 		Mods::mountedFilepathsSaved = Mods::mountedFilepaths;
 		Mods::numCurrentModsLoaded = Mods::mountedFilepaths.size();
-		if ( Mods::numCurrentModsLoaded == 0 )
+		const int chosenScriptMods = enabledScriptModCount();
+		if ( Mods::numCurrentModsLoaded == 0 && chosenScriptMods == 0 )
 		{
 			errorPrompt(Language::get(5852), Language::get(5853),
 				[](Button&) {
@@ -28498,7 +28533,7 @@ failed:
 
 		soundActivate();
 
-		if ( Mods::numCurrentModsLoaded > 0 )
+		if ( Mods::numCurrentModsLoaded > 0 || chosenScriptMods > 0 )
 		{
 			steamAchievement("BARONY_ACH_LOCAL_CUSTOMS");
 		}
@@ -28506,6 +28541,18 @@ failed:
 		gui->deselect();
 
 		Mods::loadMods();
+
+		// (re)load the script mods that are turned on, picking up any changes to them
+		Scripting::deinit();
+		Scripting::init();
+
+		// Script mods count as loaded mods. Like data mods that change gameplay, they disable
+		// achievements: a script can change anything, and there's no verifying what it does.
+		Mods::numCurrentModsLoaded += (int)Scripting::loadedModCount();
+		if ( Scripting::loadedModCount() > 0 )
+		{
+			Mods::disableSteamAchievements = true;
+		}
 
 		destroyMainMenu();
 		createMainMenu(false);
@@ -29723,6 +29770,367 @@ failed:
 		});
 	}
 
+	// Lua script mods (scripts/<name>/main.lua, see scripting/README.md) have their own tab.
+	// Choosing them here is kept in the settings; startModdedGame() loads the chosen ones, and
+	// unloading mods unloads them too.
+	static std::vector<Scripting::ModFolder> scriptModFolders; // the mods listed in the tab
+
+	static void updateScriptModFrame(Frame& subwindow, int index)
+	{
+		char name[32];
+		snprintf(name, sizeof(name), "script_mod%d", index);
+		const std::string buttonName = std::string(name) + "_button";
+		Frame* frame = subwindow.findFrame(name);
+		Button* button = subwindow.findButton(buttonName.c_str());
+		if ( !frame || !button || index < 0 || index >= (int)scriptModFolders.size() )
+		{
+			return;
+		}
+		const auto& mod = scriptModFolders[index];
+		if ( mod.enabled )
+		{
+			button->setText(Language::get(5854));
+			button->setBackground("*#images/ui/Main Menus/Mods/Unload_Button_00.png");
+			button->setBackgroundHighlighted("*#images/ui/Main Menus/Mods/Unload_Button_High00.png");
+			button->setBackgroundActivated("*#images/ui/Main Menus/Mods/Unload_Button_Press00.png");
+		}
+		else
+		{
+			button->setText(Language::get(5855));
+			button->setBackground("*#images/ui/Main Menus/Mods/Load_Button_00.png");
+			button->setBackgroundHighlighted("*#images/ui/Main Menus/Mods/Load_Button_High00.png");
+			button->setBackgroundActivated("*#images/ui/Main Menus/Mods/Load_Button_Press00.png");
+		}
+
+		// mods load when a modded game starts, so in the menu an enabled mod may not be loaded yet
+		const char* status = nullptr;
+		Uint32 statusColor = makeColorRGB(128, 128, 128);
+		if ( !mod.enabled )
+		{
+			status = langOr(7004, "Turned off");
+		}
+		else if ( !mod.loaded )
+		{
+			status = langOr(7005, "Loads on start");
+			statusColor = makeColorRGB(255, 255, 255);
+		}
+		else if ( mod.hadError )
+		{
+			status = langOr(7003, "Errors, see log.txt");
+			statusColor = hudColors.characterSheetRed;
+		}
+		else
+		{
+			status = langOr(7002, "Running");
+			statusColor = hudColors.characterSheetGreen;
+		}
+		if ( auto statusField = frame->findField("status") )
+		{
+			statusField->setText(status);
+			statusField->setColor(statusColor);
+		}
+
+		const Uint32 color = mod.enabled ? makeColorRGB(255, 255, 255) : makeColorRGB(128, 128, 128);
+		for ( auto fieldName : { "title", "desc" } )
+		{
+			if ( auto field = frame->findField(fieldName) )
+			{
+				field->setColor(color);
+			}
+		}
+		if ( auto meta = frame->findField("meta") )
+		{
+			meta->setColor(mod.enabled ? makeColorRGB(160, 160, 160) : makeColorRGB(96, 96, 96));
+		}
+		if ( auto bg = frame->findImage("bg") )
+		{
+			bg->path = mod.enabled
+				? "*#images/ui/Main Menus/Mods/ModMenu_ItemBlueOn_00.png"
+				: "*#images/ui/Main Menus/Mods/ModMenu_ItemBlue_00.png";
+		}
+	}
+
+	static Frame* makeScriptModFrame(Frame& subwindow, int y, int index)
+	{
+		char name[32];
+		snprintf(name, sizeof(name), "script_mod%d", index);
+		const auto& mod = scriptModFolders[index];
+
+		auto frame = subwindow.addFrame(name);
+		frame->setSize(SDL_Rect{ 16, y, 884, 86 });
+		frame->enableScroll(false);
+		frame->setAllowScrollBinds(false);
+		frame->setHollow(true);
+		frame->addImage(SDL_Rect{ 0, 0, 890, 82 }, makeColorRGB(255, 255, 255),
+			"*#images/ui/Main Menus/Mods/ModMenu_ItemBlue_00.png", "bg");
+
+		const int padx = 54;
+		const int padleft = padx + 4 + 64;
+		auto title = frame->addField("title", 64);
+		title->setText(truncated(mod.title, 40).c_str());
+		title->setFont(bigfont_outline);
+		title->setSize(SDL_Rect{ padleft, 8, 524, 24 });
+
+		// one line of description, then who made it and where it lives
+		auto desc = frame->addField("desc", 1024);
+		desc->setFont(smallfont_outline);
+		desc->setSize(SDL_Rect{ padleft + 4, 8 + 24 + 1, 732, 24 });
+		desc->setText(truncated(mod.description, 90).c_str());
+
+		std::string metaStr;
+		if ( !mod.author.empty() )
+		{
+			char buf[128];
+			snprintf(buf, sizeof(buf), langOr(7006, "by %s"), truncated(mod.author, 32).c_str());
+			metaStr += buf;
+			metaStr += "   ";
+		}
+		if ( !mod.version.empty() )
+		{
+			metaStr += "v" + truncated(mod.version, 16) + "   ";
+		}
+		metaStr += "/scripts/" + truncated(mod.name, 32) + "/";
+		auto meta = frame->addField("meta", 256);
+		meta->setFont(smallfont_outline);
+		meta->setSize(SDL_Rect{ padleft + 4, 8 + 24 + 1 + 22, 732, 20 });
+		meta->setText(metaStr.c_str());
+
+		// where the load order sits on data mods
+		auto statusField = frame->addField("status", 64);
+		statusField->setFont(smallfont_outline);
+		statusField->setSize(SDL_Rect{ frame->getSize().w - 200 - 36, 7, 200, 24 });
+		statusField->setHJustify(Field::justify_t::RIGHT);
+
+		// the mod's own 64x64 preview.png, else the picture of the spell mod.json names, else a spellbook
+		auto panel = frame->addImage(SDL_Rect{ padx - 6, 8, 68, 68 }, makeColorRGB(255, 255, 255),
+			"*#images/ui/Main Menus/Mods/ModMenu_PreviewFrame.png", "preview bg");
+		const std::string previewPath = Scripting::scriptsDirectory() + "/" + mod.name + "/preview.png";
+		if ( dataPathExists(previewPath.c_str(), false) ) // Image::get() can't tell us: it never returns null
+		{
+			frame->addImage(SDL_Rect{ panel->pos.x + 2, panel->pos.y + 2, 64, 64 }, makeColorRGB(255, 255, 255),
+				previewPath.c_str(), "preview");
+		}
+		else
+		{
+			std::string iconPath = "items/images/SpellbookPurple.png";
+			auto spell = ItemTooltips.spellNameStringToSpellID.find(mod.iconSpell);
+			if ( spell != ItemTooltips.spellNameStringToSpellID.end() )
+			{
+				if ( node_t* node = ItemTooltips.getSpellNodeFromSpellID(spell->second) )
+				{
+					if ( auto str = (string_t*)node->element )
+					{
+						iconPath = str->data;
+					}
+				}
+			}
+			iconPath = "*#" + iconPath; // item pictures are 36x36 pixel art: scale without blurring
+			frame->addImage(SDL_Rect{ panel->pos.x + 2 + 5, panel->pos.y + 2 + 5, 54, 54 }, makeColorRGB(255, 255, 255),
+				iconPath.c_str(), "preview");
+		}
+
+		const std::string buttonName = std::string(name) + "_button";
+		auto button = subwindow.addButton(buttonName.c_str());
+		button->setColor(0xffffffff);
+		button->setHighlightColor(0xffffffff);
+		button->setSize(SDL_Rect{ frame->getSize().x + frame->getSize().w, frame->getSize().y + 8, 158, 44 });
+		button->setUserData((void*)(intptr_t)index);
+		button->setFont(smallfont_outline);
+		button->setScrollParentOffset(SDL_Rect{ 0, -24, 0, 48 });
+		button->setWidgetSearchParent("mods_menu");
+		button->setWidgetPageLeft("tab_left");
+		button->setWidgetPageRight("tab_right");
+		button->setWidgetBack("back_button");
+		button->addWidgetAction("MenuAlt1", "blank_mod_folder");
+		button->addWidgetAction("MenuAlt2", "load_status_help");
+		button->addWidgetAction("MenuStart", "start_modded_game");
+		button->setCallback([](Button& button) {
+			const int index = (int)reinterpret_cast<intptr_t>(button.getUserData());
+			if ( index < 0 || index >= (int)scriptModFolders.size() )
+			{
+				return;
+			}
+			// takes effect when a modded game is started
+			const bool enable = !scriptModFolders[index].enabled;
+			Scripting::setModEnabled(scriptModFolders[index].name, enable);
+			scriptModFolders[index].enabled = enable;
+			if ( enable )
+			{
+				soundActivate();
+			}
+			else
+			{
+				soundCancel();
+			}
+			chosenScriptModCount += enable ? 1 : -1;
+			allSettings.disabled_script_mods = Scripting::disabledMods();
+			(void)settingsSave();
+			updateScriptModFrame(*static_cast<Frame*>(button.getParent()), index);
+		});
+
+		SDL_Rect framePos = frame->getSize();
+		framePos.w = subwindow.getSize().w - framePos.x * 2;
+		frame->setSize(framePos);
+
+		updateScriptModFrame(subwindow, index);
+		return frame;
+	}
+
+	static void workshopLoadScriptMods(Button& button) {
+		mods_loading_tick = ticks;
+		mods_active_tab = "Script Mods";
+		auto prompt = monoPrompt(
+			langOr(7000, "Loading script mods..."),
+			Language::get(5860),
+			[](Button&) {
+				soundCancel();
+				closeMono();
+
+				assert(main_menu_frame);
+				if ( auto mods_menu = main_menu_frame->findFrame("mods_menu") )
+				{
+					if ( auto tab = mods_menu->findButton(mods_active_tab.c_str()) )
+					{
+						tab->select();
+					}
+				}
+			});
+
+		if ( auto mods_menu = main_menu_frame->findFrame("mods_menu") )
+		{
+			// the same buttons as the local mods tab
+			auto enter = mods_menu->findButton("start_modded_game");
+			if ( enter )
+			{
+				enter->setDisabled(false);
+				enter->setInvisible(false);
+			}
+			auto new_workshop_mod = mods_menu->findButton("new_workshop_mod");
+			if ( new_workshop_mod )
+			{
+				new_workshop_mod->setDisabled(true);
+				new_workshop_mod->setInvisible(true);
+				if ( new_workshop_mod->isSelected() && enter )
+				{
+					enter->select();
+				}
+			}
+			auto blank_mod_folder = mods_menu->findButton("blank_mod_folder");
+			if ( blank_mod_folder )
+			{
+				blank_mod_folder->setDisabled(false);
+				blank_mod_folder->setInvisible(false);
+			}
+			auto browse_workshop = mods_menu->findButton("browse_workshop");
+			if ( browse_workshop )
+			{
+				browse_workshop->setDisabled(true);
+				browse_workshop->setInvisible(true);
+				if ( browse_workshop->isSelected() && blank_mod_folder )
+				{
+					blank_mod_folder->select();
+				}
+			}
+			if ( auto subwindow = mods_menu->findFrame("subwindow") )
+			{
+				if ( auto no_mods_found = subwindow->findField("no_mods_found") )
+				{
+					no_mods_found->setDisabled(true);
+					no_mods_found->setText("");
+				}
+			}
+		}
+
+		scriptModFolders = Scripting::listModFolders();
+
+		if ( !prompt )
+		{
+			return;
+		}
+
+		prompt->setTickCallback([](Widget& widget) {
+			if ( (ticks - mods_loading_tick) <= TICKS_PER_SECOND / 2 )
+			{
+				return;
+			}
+			closeMono();
+
+			auto window = main_menu_frame->findFrame("mods_menu");
+			if ( !window )
+			{
+				return;
+			}
+			if ( auto tab = window->findButton(mods_active_tab.c_str()) )
+			{
+				tab->select();
+			}
+			auto subwindow = window->findFrame("subwindow");
+			if ( !subwindow )
+			{
+				return;
+			}
+			for ( auto f : subwindow->getFrames() )
+			{
+				f->removeSelf();
+			}
+			for ( auto b : subwindow->getButtons() )
+			{
+				b->removeSelf();
+			}
+
+			SDL_Rect actualPos = subwindow->getActualSize();
+			actualPos.y = 0;
+			actualPos.h = subwindow->getSize().h;
+
+			Frame* prevFrame = nullptr;
+			const int frameHeight = 82 + 8;
+			for ( int index = 0; index < (int)scriptModFolders.size(); ++index )
+			{
+				char name[32];
+				snprintf(name, sizeof(name), "script_mod%d", index);
+				const std::string currentButtonName = std::string(name) + "_button";
+				std::string prevButtonName = "";
+				if ( prevFrame )
+				{
+					prevButtonName = prevFrame->getName();
+					prevButtonName += "_button";
+					if ( Button* prevButton = subwindow->findButton(prevButtonName.c_str()) )
+					{
+						prevButton->setWidgetDown(currentButtonName.c_str());
+					}
+				}
+
+				prevFrame = makeScriptModFrame(*subwindow, prevFrame ? prevFrame->getSize().y + frameHeight : 24, index);
+
+				if ( auto currentButton = subwindow->findButton(currentButtonName.c_str()) )
+				{
+					if ( prevButtonName != "" )
+					{
+						currentButton->setWidgetUp(prevButtonName.c_str());
+					}
+					if ( index == 0 )
+					{
+						currentButton->select();
+					}
+				}
+			}
+			if ( prevFrame )
+			{
+				actualPos.h = std::max(actualPos.h, prevFrame->getSize().y + frameHeight);
+			}
+			subwindow->setActualSize(actualPos);
+
+			auto rock_background = subwindow->findImage("rock_background");
+			rock_background->pos = subwindow->getActualSize();
+
+			if ( auto no_mods_found = subwindow->findField("no_mods_found") )
+			{
+				no_mods_found->setDisabled(!scriptModFolders.empty());
+				no_mods_found->setText(langOr(7001, "No folders with a main.lua found in /scripts/ directory."));
+			}
+		});
+	}
+
 	static void createWorkshopUploadWindow();
 
 	static Frame* workshopEditPrompt(
@@ -29915,6 +30323,7 @@ failed:
 		Mods::mountedFilepaths = Mods::mountedFilepathsSaved;
 		Mods::mountAllExistingPaths();
 		Mods::updateModCounts();
+		chosenScriptModCount = enabledScriptModCount();
 
 		auto dimmer = main_menu_frame->addFrame("dimmer");
 		dimmer->setSize(SDL_Rect{ 0, 0, Frame::virtualScreenX, Frame::virtualScreenY });
@@ -29986,6 +30395,7 @@ failed:
 			{"Steam Workshop", Language::get(5867), workshopLoadSubscribedItems},
 			{"My Workshop Items", Language::get(5868), workshopLoadMyItems},
 #endif
+			{"Script Mods", langOr(6999, "Script\nMods"), workshopLoadScriptMods},
 		};
 
 		auto back_button = createBackWidget(window, [](Button& button) {
@@ -29998,6 +30408,7 @@ failed:
                         soundActivate();
                         gui->deselect();
                         Mods::unloadMods();
+                        Scripting::deinit();
                         destroyMainMenu();
                         createMainMenu(false);
 					},
@@ -30011,6 +30422,7 @@ failed:
 				soundCancel();
 				gui->deselect();
 				Mods::unloadMods();
+				Scripting::deinit();
 				destroyMainMenu();
 				createMainMenu(false);
 			}
@@ -30052,6 +30464,7 @@ failed:
 			{"Steam Workshop", Language::get(5867), workshopLoadSubscribedItems},
 			{"My Workshop Items", Language::get(5868), workshopLoadMyItems},
 #endif
+			{"Script Mods", langOr(6999, "Script\nMods"), workshopLoadScriptMods},
 			};
 #ifdef STEAMWORKS
 			if ( mods_active_tab == mod_tabs[2].name )
@@ -30090,14 +30503,15 @@ failed:
 			{
 				Field* field = static_cast<Field*>(&widget);
 				char buf[128] = "";
+				// in this window numCurrentModsLoaded counts data mods; chosen script mods are local mods too
 #ifndef STEAMWORKS
 				snprintf(buf, sizeof(buf), "\n%d\n",
-					Mods::numCurrentModsLoaded);
+					Mods::numCurrentModsLoaded + chosenScriptModCount);
 #else
 				snprintf(buf, sizeof(buf), "%d\n%d\n%d",
-					Mods::mods_loaded_local.size(),
-					Mods::mods_loaded_workshop.size(),
-					Mods::numCurrentModsLoaded);
+					(int)Mods::mods_loaded_local.size() + chosenScriptModCount,
+					(int)Mods::mods_loaded_workshop.size(),
+					Mods::numCurrentModsLoaded + chosenScriptModCount);
 #endif
 				field->setText(buf);
 				assert((Mods::mods_loaded_local.size() + Mods::mods_loaded_workshop.size())
@@ -30117,7 +30531,7 @@ failed:
 		achievements_status->setIndividualLinePadding(1, 8);
 		achievements_status->setTickCallback([](Widget& widget) {
 			Field* field = static_cast<Field*>(&widget);
-		if ( Mods::disableSteamAchievements )
+		if ( Mods::disableSteamAchievements || chosenScriptModCount > 0 ) // see startModdedGame()
 		{
 			field->setText(Language::get(5874));
 			field->setTextColor(hudColors.characterSheetRed);
@@ -30650,6 +31064,7 @@ failed:
 					{"Steam Workshop", Language::get(5867), workshopLoadSubscribedItems},
 					{"My Workshop Items", Language::get(5868), workshopLoadMyItems},
 #endif
+					{"Script Mods", langOr(6999, "Script\nMods"), workshopLoadScriptMods},
 				};
 				for ( auto& tab : mod_tabs ) {
 					auto button = mods_menu->findButton(tab.name);
@@ -30694,6 +31109,7 @@ failed:
 					{"Steam Workshop", Language::get(5867), workshopLoadSubscribedItems},
 					{"My Workshop Items", Language::get(5868), workshopLoadMyItems},
 #endif
+					{"Script Mods", langOr(6999, "Script\nMods"), workshopLoadScriptMods},
 				};
 				for ( auto it = mod_tabs.rbegin(); it != mod_tabs.rend(); ++it ) {
 					auto tab = (*it);
@@ -30741,6 +31157,7 @@ failed:
 			{"Steam Workshop", Language::get(5867), workshopLoadSubscribedItems},
 			{"My Workshop Items", Language::get(5868), workshopLoadMyItems},
 #endif
+			{"Script Mods", langOr(6999, "Script\nMods"), workshopLoadScriptMods},
 			};
 
 			for ( auto& tab : mod_tabs ) 

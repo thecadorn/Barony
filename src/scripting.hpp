@@ -29,12 +29,40 @@ namespace Scripting
 	static const int kCustomSpellIDStart = 500;
 	static const int kCustomSpellIDEnd = 1000;
 
-	// Creates the Lua VM, loads every script mod, then fires the onInit callbacks.
-	// Called once after initGame() succeeds.
+	// Script mods only run in a modded game, like data mods: init() runs when the player starts
+	// one from the main menu's mods window, and deinit() when they unload mods (and at shutdown).
+	// Both are main menu only, since custom spell IDs depend on which mods are loaded.
+
+	// Creates the Lua VM, loads every script mod that's turned on, then fires the onInit callbacks.
 	void init();
 
-	// Destroys the Lua VM. Called before deinitGame().
+	// Destroys the Lua VM and removes the spells script mods defined.
 	void deinit();
+
+	// Script mods can be turned off in the mods window. Turned-off mods are remembered by
+	// folder name in the game's settings, and init() skips them.
+	//
+	// What the mods window shows comes from an optional mod.json next to main.lua, read without
+	// running any script: { "name", "description", "author", "version", "icon" }, all strings.
+	// "icon" names a spell whose picture to show; a preview.png in the folder takes precedence.
+	struct ModFolder
+	{
+		std::string name;        // folder name, which identifies the mod
+		std::string title;       // mod.json "name", or the folder name made readable
+		std::string description;
+		std::string author;
+		std::string version;
+		std::string iconSpell;   // mod.json "icon"
+		bool enabled = true;
+		bool loaded = false;     // its main.lua ran in the current Lua VM
+		bool hadError = false;   // it has raised an error since loading (details in log.txt)
+	};
+	std::string scriptsDirectory();
+	std::vector<ModFolder> listModFolders(); // folders in scriptsDirectory() with a main.lua, alphabetical
+	size_t loadedModCount();
+	std::vector<std::string> disabledMods();
+	void setDisabledMods(const std::vector<std::string>& names); // these take effect at the next init()
+	void setModEnabled(const std::string& name, bool enabled);
 
 	// Re-adds script-defined spells after setupSpells() rebuilds the spell tables.
 	void reapplyCustomSpells();

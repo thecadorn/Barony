@@ -7377,9 +7377,6 @@ int main(int argc, char** argv)
 		}
 		initialized = true;
 
-		// load Lua script mods
-		Scripting::init();
-
 		// initialize player conducts
 		setDefaultPlayerConducts();
 

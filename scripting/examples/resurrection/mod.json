@@ -1,0 +1,6 @@
+{
+	"name": "Resurrection",
+	"description": "A multiplayer spell that brings a fallen ally back, using shared party charges.",
+	"version": "1.0",
+	"icon": "spell_extrahealing"
+}

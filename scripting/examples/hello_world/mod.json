@@ -1,0 +1,5 @@
+{
+	"name": "Hello World",
+	"description": "The simplest possible script mod: logs a greeting to log.txt when it loads.",
+	"version": "1.0"
+}
