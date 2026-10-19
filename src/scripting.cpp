@@ -59,6 +59,13 @@ namespace Scripting
 		std::vector<Callback> onBeforeSpellCastCallbacks;
 		std::vector<Callback> onGameStartCallbacks;
 		std::vector<Callback> onBeforeGameplayStartCallbacks;
+		std::vector<Callback> onFloorChangeCallbacks;
+		struct SharedChangeCallback
+		{
+			std::string name; // the shared value it watches
+			Callback cb;
+		};
+		std::vector<SharedChangeCallback> onSharedChangeCallbacks;
 
 		// A spell defined by a script: a clone of an existing spell with a new ID and tweaks.
 		struct CustomSpell
@@ -88,6 +95,18 @@ namespace Scripting
 		// level. Clients keep the received values in this same map, so on a client getShared()
 		// returns the host's value as of the last update, which can briefly be out of date.
 		std::map<std::string, lua_Number> sharedValues;
+		constexpr size_t kMaxSharedNameLength = 64;
+
+		// Lines of text script mods show on every local player's HUD (barony.setHudText), in the
+		// order they were added. Local to this machine and never saved.
+		struct HudLine
+		{
+			size_t mod;
+			std::string id;
+			std::string text;
+		};
+		std::vector<HudLine> hudLines;
+		constexpr size_t kMaxHudIdLength = 64;
 
 		// host: sends one shared value to a remote client; a null value means it was removed
 		void sendSharedValue(int player, const char* name, const lua_Number* value)
@@ -1005,10 +1024,18 @@ namespace Scripting
 			return 0;
 		}
 
+		// barony.onFloorChange(fn): fn(floor, previousFloor) runs on the host when the party
+		// arrives on a floor, before the game saves. Floors are numbered as the game shows them.
+		int api_onFloorChange(lua_State* L)
+		{
+			addCallback(onFloorChangeCallbacks, L);
+			return 0;
+		}
+
 		bool isValidSharedName(const char* name)
 		{
 			const size_t length = strlen(name);
-			if ( length == 0 || length > 64 )
+			if ( length == 0 || length > kMaxSharedNameLength )
 			{
 				return false;
 			}
@@ -1020,6 +1047,80 @@ namespace Scripting
 				}
 			}
 			return true;
+		}
+
+		// Shared values are stored as floats; whole numbers go to Lua as integers so that they
+		// print as "3", not "3.0".
+		void pushSharedValue(lua_State* L, lua_Number value)
+		{
+			lua_Integer integer;
+			if ( lua_numbertointeger(value, &integer) && (lua_Number)integer == value )
+			{
+				lua_pushinteger(L, integer);
+			}
+			else
+			{
+				lua_pushnumber(L, value);
+			}
+		}
+
+		// Every change to this machine's shared values goes through here: stores the value (or
+		// removes it, for a null value) and, if that changed anything, sends the change to the
+		// clients (host only) and runs the onSharedChange callbacks for it.
+		void changeSharedValue(const char* nameIn, const lua_Number* valueIn)
+		{
+			// copies, since the name can point into net_packet and callbacks can send packets
+			char name[kMaxSharedNameLength + 1];
+			snprintf(name, sizeof(name), "%s", nameIn);
+			const bool removed = valueIn == nullptr;
+			const lua_Number value = removed ? 0 : *valueIn;
+
+			auto find = sharedValues.find(name);
+			if ( removed )
+			{
+				if ( find == sharedValues.end() )
+				{
+					return;
+				}
+				sharedValues.erase(find);
+			}
+			else
+			{
+				if ( find != sharedValues.end() && find->second == value )
+				{
+					return;
+				}
+				sharedValues[name] = value;
+			}
+
+			for ( int c = 1; c < MAXPLAYERS; ++c )
+			{
+				sendSharedValue(c, name, removed ? nullptr : &value);
+			}
+
+			if ( !L )
+			{
+				return;
+			}
+			// by index, since a callback may register more callbacks
+			for ( size_t i = 0; i < onSharedChangeCallbacks.size(); ++i )
+			{
+				if ( onSharedChangeCallbacks[i].name != name )
+				{
+					continue;
+				}
+				const Callback cb = onSharedChangeCallbacks[i].cb;
+				lua_rawgeti(L, LUA_REGISTRYINDEX, cb.fn);
+				if ( removed )
+				{
+					lua_pushnil(L);
+				}
+				else
+				{
+					pushSharedValue(L, value);
+				}
+				protectedCall(cb.mod, 1, 0, "onSharedChange");
+			}
 		}
 
 		void checkSharedName(lua_State* L)
@@ -1038,22 +1139,28 @@ namespace Scripting
 			}
 			checkSharedName(L);
 			const char* name = lua_tostring(L, 1);
-			const lua_Number* sent = nullptr;
-			lua_Number value = 0;
 			if ( lua_isnoneornil(L, 2) )
 			{
-				sharedValues.erase(name);
+				changeSharedValue(name, nullptr);
 			}
 			else
 			{
-				value = luaL_checknumber(L, 2);
-				sharedValues[name] = value;
-				sent = &value;
+				const lua_Number value = luaL_checknumber(L, 2);
+				changeSharedValue(name, &value);
 			}
-			for ( int c = 1; c < MAXPLAYERS; ++c )
-			{
-				sendSharedValue(c, name, sent);
-			}
+			return 0;
+		}
+
+		// barony.onSharedChange(name, fn): fn(value) runs on this machine whenever its copy of the
+		// shared value changes: setShared on the host, an update reaching a client, a save loading,
+		// or values being cleared when a run starts or ends (value is then nil).
+		int api_onSharedChange(lua_State* L)
+		{
+			checkSharedName(L);
+			luaL_checktype(L, 2, LUA_TFUNCTION);
+			lua_settop(L, 2);
+			const int fn = luaL_ref(L, LUA_REGISTRYINDEX); // pops fn
+			onSharedChangeCallbacks.push_back(SharedChangeCallback{ lua_tostring(L, 1), Callback{ modIndex(L), fn } });
 			return 0;
 		}
 
@@ -1069,7 +1176,7 @@ namespace Scripting
 			}
 			else
 			{
-				lua_pushnumber(L, find->second);
+				pushSharedValue(L, find->second);
 			}
 			return 1;
 		}
@@ -1090,6 +1197,44 @@ namespace Scripting
 			char line[256]; // messages are copied into fixed-size buffers and packets
 			snprintf(line, sizeof(line), "%s", text);
 			messagePlayer(player, MESSAGE_MISC, "%s", line);
+			return 0;
+		}
+
+		// barony.setHudText(id, text): shows a line of text on every local player's HUD, or
+		// removes it when text is nil. Each mod's ids are its own. Not sent to other machines.
+		int api_setHudText(lua_State* L)
+		{
+			const char* id = luaL_checkstring(L, 1);
+			const size_t idLength = strlen(id);
+			luaL_argcheck(L, idLength >= 1 && idLength <= kMaxHudIdLength, 1, "id must be 1-64 characters");
+			const char* text = luaL_optstring(L, 2, nullptr);
+			luaL_argcheck(L, !text || strlen(text) <= (size_t)kMaxHudTextLength, 2, "text must be at most 128 characters");
+
+			const size_t mod = modIndex(L);
+			size_t i = 0;
+			while ( i < hudLines.size() && !(hudLines[i].mod == mod && hudLines[i].id == id) )
+			{
+				++i;
+			}
+			if ( !text )
+			{
+				if ( i < hudLines.size() )
+				{
+					hudLines.erase(hudLines.begin() + i);
+				}
+			}
+			else if ( i < hudLines.size() )
+			{
+				hudLines[i].text = text;
+			}
+			else if ( hudLines.size() >= (size_t)kMaxHudTextLines )
+			{
+				return luaL_error(L, "the HUD can show at most %d lines from script mods", kMaxHudTextLines);
+			}
+			else
+			{
+				hudLines.push_back(HudLine{ mod, id, text });
+			}
 			return 0;
 		}
 
@@ -1145,6 +1290,9 @@ namespace Scripting
 				{ "message", api_message },
 				{ "inventory", api_inventory },
 				{ "onBeforeGameplayStart", api_onBeforeGameplayStart },
+				{ "onFloorChange", api_onFloorChange },
+				{ "onSharedChange", api_onSharedChange },
+				{ "setHudText", api_setHudText },
 				{ nullptr, nullptr },
 			};
 			lua_pushinteger(L, (lua_Integer)mod);
@@ -1281,6 +1429,9 @@ namespace Scripting
 		onBeforeSpellCastCallbacks.clear();
 		onGameStartCallbacks.clear();
 		onBeforeGameplayStartCallbacks.clear();
+		onFloorChangeCallbacks.clear();
+		onSharedChangeCallbacks.clear();
+		hudLines.clear();
 		customSpells.clear();
 	}
 
@@ -1411,7 +1562,30 @@ namespace Scripting
 
 	void resetSharedValues()
 	{
-		sharedValues.clear();
+		std::vector<std::string> names; // copied, since removing them changes the map
+		for ( auto& value : sharedValues )
+		{
+			names.push_back(value.first);
+		}
+		for ( auto& name : names )
+		{
+			changeSharedValue(name.c_str(), nullptr);
+		}
+	}
+
+	void clearHudText()
+	{
+		hudLines.clear();
+	}
+
+	size_t hudTextLineCount()
+	{
+		return hudLines.size();
+	}
+
+	const char* hudTextLine(size_t index)
+	{
+		return index < hudLines.size() ? hudLines[index].text.c_str() : "";
 	}
 
 	void sendSharedValues(int player)
@@ -1442,11 +1616,12 @@ namespace Scripting
 		}
 		if ( net_packet->data[4] == 1 )
 		{
-			sharedValues.erase(name);
+			changeSharedValue(name, nullptr);
 		}
 		else
 		{
-			sharedValues[name] = (lua_Number)atof(text);
+			const lua_Number value = (lua_Number)atof(text);
+			changeSharedValue(name, &value);
 		}
 	}
 
@@ -1478,14 +1653,33 @@ namespace Scripting
 
 	void restoreSharedValues(const std::vector<std::pair<std::string, std::string>>& additionalData)
 	{
-		sharedValues.clear();
+		std::map<std::string, lua_Number> saved;
 		const size_t prefixLength = strlen(kSavedSharedKeyPrefix);
 		for ( auto& entry : additionalData )
 		{
-			if ( entry.first.compare(0, prefixLength, kSavedSharedKeyPrefix) == 0 )
+			if ( entry.first.compare(0, prefixLength, kSavedSharedKeyPrefix) == 0
+				&& isValidSharedName(entry.first.c_str() + prefixLength) )
 			{
-				sharedValues[entry.first.substr(prefixLength)] = (lua_Number)atof(entry.second.c_str());
+				saved[entry.first.substr(prefixLength)] = (lua_Number)atof(entry.second.c_str());
 			}
+		}
+
+		// go through changeSharedValue so mods hear about the values the save changes
+		std::vector<std::string> removed;
+		for ( auto& value : sharedValues )
+		{
+			if ( saved.find(value.first) == saved.end() )
+			{
+				removed.push_back(value.first);
+			}
+		}
+		for ( auto& name : removed )
+		{
+			changeSharedValue(name.c_str(), nullptr);
+		}
+		for ( auto& value : saved )
+		{
+			changeSharedValue(value.first.c_str(), &value.second);
 		}
 	}
 
@@ -1524,6 +1718,22 @@ namespace Scripting
 			lua_rawgeti(L, LUA_REGISTRYINDEX, cb.fn);
 			lua_pushinteger(L, player);
 			protectedCall(cb.mod, 1, 0, "onBeforeGameplayStart");
+		}
+	}
+
+	void onFloorChange(int floor, int previousFloor)
+	{
+		if ( !L || multiplayer == CLIENT )
+		{
+			return;
+		}
+		for ( size_t i = 0; i < onFloorChangeCallbacks.size(); ++i )
+		{
+			const Callback cb = onFloorChangeCallbacks[i];
+			lua_rawgeti(L, LUA_REGISTRYINDEX, cb.fn);
+			lua_pushinteger(L, floor);
+			lua_pushinteger(L, previousFloor);
+			protectedCall(cb.mod, 2, 0, "onFloorChange");
 		}
 	}
 }

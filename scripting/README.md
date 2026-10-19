@@ -47,6 +47,8 @@ The complete, typed API is in [`barony.d.lua`](barony.d.lua). If your editor use
 | `barony.onInit(fn())` | Once at startup, after all script mods have loaded. Define custom spells here. |
 | `barony.onGameStart(fn(player))` | A new run starts, after each local player's class loadout is set up. Not called when loading a save. |
 | `barony.onBeforeGameplayStart(fn(player))` | A new run is fully set up, including the default hotbar, right before play begins. Arrange the hotbar here. |
+| `barony.onSharedChange(name, fn(value))` | This machine's copy of a shared value changed: `setShared` on the host, an update reaching a client, a save loading, or values being cleared when a run starts or ends (`value` is then `nil`). Runs on every machine, so it's the place to keep HUD text up to date. Don't do gameplay here; it can run while a save is loading. |
+| `barony.onFloorChange(fn(floor, previousFloor))` | The party arrived on a floor (numbered as the game shows them), before the game saves. Also called for going back up, secret levels and reloading a floor, so compare the numbers. Host only; not called when loading a save. |
 | `barony.onBeforeSpellCast(fn(spellName, player))` | A spell is about to be cast, before any mana is spent. Return `false, "reason"` to refuse it; the caster sees the reason. Called on the caster's machine before the cast animation, and again on the host when it finishes, so only check things here, don't change them. The host's check decides. |
 | `barony.onSpellCast(fn(spellName, player))` | Any spell is successfully cast. `player` is `nil` for monsters and traps. Return `false` to skip the spell's normal effect. |
 
@@ -61,8 +63,9 @@ The complete, typed API is in [`barony.d.lua`](barony.d.lua). If your editor use
 | `barony.player(player)` | The player's stats (`hp`, `maxhp`, `mp`, `maxmp`), whether they're `alive` (or their `state`: `"alive"`, `"dying"` or `"dead"`), their position (`x`, `y`), and `revive(x, y)` to bring them back to life when `canRevive` is true. |
 | `barony.maxPlayers` | How many player slots there are; players are numbered 0 to `maxPlayers - 1`. |
 | `barony.message(player, text)` | Shows a line in a player's in-game message log. |
+| `barony.setHudText(id, text)` | Shows a line of text (up to 128 characters) in the bottom right of every local player's HUD, or removes it when `text` is `nil`. Calling it again with the same `id` replaces the line. Only affects this machine. At most 8 lines across all mods; they're removed when the run ends. |
 | `barony.isHost()` | `true` on the host and in single player, where gameplay is decided. |
-| `barony.setShared(name, value)` / `barony.getShared(name)` | A named number for the current run (for example a party-wide counter). Saved with the game, cleared when a new run starts. Only the host can set it. Clients can read it, but get the host's value as of the last update (`nil` until the first one arrives). |
+| `barony.setShared(name, value)` / `barony.getShared(name)` | A named number for the current run (for example a party-wide counter). Saved with the game, cleared when a run starts or ends. Only the host can set it. Clients can read it, but get the host's value as of the last update (`nil` until the first one arrives). |
 | `barony.hotbar(player)` | The player's hotbar: `getSlot`, `setSlot`, `clearSlot`, `firstEmptySlot`. Slots are numbered 0–9. |
 | `barony.inventory(player)` | The player's inventory: `findSpell(spellName)`. |
 
@@ -98,6 +101,9 @@ end)
 
 Where things run:
 
+- `onFloorChange` runs only on the host.
+- `onSharedChange` runs on every machine, whenever that machine's copy of the value changes. `setHudText` only affects the machine it runs on.
+- `onBeforeSpellCast` runs on the caster's machine before the cast animation, then on the host.
 - `onSpellCast` runs only on the host, for every player's casts. Changes it makes (such as `player.maxhp`) are sent to everyone automatically.
 - `onGameStart` and `onBeforeGameplayStart` run on each player's own machine, for that machine's players. Teaching spells and arranging the hotbar happen there.
 - Player stats can only be changed on the host.

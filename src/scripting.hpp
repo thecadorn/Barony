@@ -46,8 +46,9 @@ namespace Scripting
 	std::vector<std::pair<std::string, std::string>> savedSpellTable();
 	std::map<int, int> savedSpellRemap(const std::vector<std::pair<std::string, std::string>>& additionalData);
 
-	// Shared values (barony.setShared/getShared) belong to the current run: cleared when a new
-	// run starts, written into the save's additional_data and restored from it on load.
+	// Shared values (barony.setShared/getShared) belong to the current run: cleared when a run
+	// starts or ends, written into the save's additional_data and restored from it on load.
+	// Every change, including these, runs the mods' onSharedChange callbacks for that value.
 	void resetSharedValues();
 	std::vector<std::pair<std::string, std::string>> savedSharedTable();
 	void restoreSharedValues(const std::vector<std::pair<std::string, std::string>>& additionalData);
@@ -59,6 +60,14 @@ namespace Scripting
 	void sendSharedValues(int player);
 	void requestSharedValues();
 	void receiveSharedValue();
+
+	// Lines of text script mods show on the HUD (barony.setHudText), drawn for every local
+	// player. clearHudText() removes them all when a run ends.
+	static const int kMaxHudTextLines = 8;    // across all mods
+	static const int kMaxHudTextLength = 128; // characters per line
+	void clearHudText();
+	size_t hudTextLineCount();
+	const char* hudTextLine(size_t index);
 
 	// Re-adds script-defined spells' tooltip text after readTooltipsFromFile() reloads templates.
 	void reapplyCustomSpellTooltips();
@@ -83,4 +92,8 @@ namespace Scripting
 	// Fires onBeforeGameplayStart for a local player once a new run is fully set up
 	// (class loadout and hotbar layout), right before gameplay begins.
 	void onBeforeGameplayStart(int player);
+
+	// Fires onFloorChange on the host once the party has arrived on a floor (currentlevel),
+	// before the level-change save, so changes the callbacks make are saved. Host only.
+	void onFloorChange(int floor, int previousFloor);
 }

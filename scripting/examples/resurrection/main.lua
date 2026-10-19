@@ -4,15 +4,18 @@
 --
 -- Besides mana, each resurrection uses one of the party's shared resurrection charges.
 -- The host keeps the count (barony.setShared), it's saved with the game, and every new run
--- starts with STARTING_CHARGES. With no charges left, or nobody to revive, the cast is
--- refused before any mana is spent and the caster is told why.
+-- starts with STARTING_CHARGES. The party gains a charge each time it reaches a floor deeper
+-- than any it has been on this run, and everyone sees the count on their HUD. With no charges
+-- left, or nobody to revive, the cast is refused before any mana is spent and the caster is
+-- told why.
 --
 -- Every new character learns the spell with it on the hotbar.
 -- Install by copying this folder to ~/.barony/scripts/resurrection/
 
 local MANA_COST = 10
 local STARTING_CHARGES = 3
-local CHARGES = "resurrection_charges" -- name of the shared value
+local CHARGES = "resurrection_charges" -- names of the shared values
+local DEEPEST_FLOOR = "resurrection_deepest_floor"
 
 barony.onInit(function()
 	barony.registerSpell{
@@ -30,9 +33,35 @@ end)
 barony.onGameStart(function(player)
 	barony.teachSpell(player, "spell_resurrection")
 
-	-- the host sets up the party's charges once per run
+	-- the host sets up the party's charges once per run. Counting floor 1 as already reached
+	-- means walking down from the starting area doesn't earn a charge; clearing floor 1 does.
 	if barony.isHost() and barony.getShared(CHARGES) == nil then
 		barony.setShared(CHARGES, STARTING_CHARGES)
+		barony.setShared(DEEPEST_FLOOR, 1)
+	end
+end)
+
+-- Show the party's charges on every player's HUD. This runs on every machine whenever its
+-- copy of the count changes (including loading a save), and with nil when the run ends.
+barony.onSharedChange(CHARGES, function(charges)
+	barony.setHudText("charges", charges and ("Resurrection charges: " .. charges) or nil)
+end)
+
+-- A charge for each new deepest floor. Remembering the deepest floor means going back up and
+-- down again, or a secret level at the same depth, doesn't earn extra charges.
+barony.onFloorChange(function(floor, previousFloor)
+	-- saves from before this was added don't have the deepest floor yet
+	local deepest = barony.getShared(DEEPEST_FLOOR) or previousFloor
+	if floor <= deepest then
+		return
+	end
+	barony.setShared(DEEPEST_FLOOR, floor)
+	local charges = (barony.getShared(CHARGES) or 0) + 1
+	barony.setShared(CHARGES, charges)
+	for i = 0, barony.maxPlayers - 1 do
+		if barony.player(i) then
+			barony.message(i, "The party gains a resurrection charge (" .. charges .. " left).")
+		end
 	end
 end)
 

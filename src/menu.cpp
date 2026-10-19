@@ -10392,6 +10392,10 @@ void doEndgame(bool saveHighscore, bool onServerDisconnect) {
 #ifdef LOCAL_ACHIEVEMENTS
 	LocalAchievements_t::writeToFile();
 #endif
+
+	// the run is over: mods hear their shared values go away, and their HUD text is removed
+	Scripting::resetSharedValues();
+	Scripting::clearHudText();
 }
 
 void doIntro() {

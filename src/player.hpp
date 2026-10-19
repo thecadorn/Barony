@@ -1504,6 +1504,7 @@ public:
 		Frame* mpFrame = nullptr;
 		Frame* minimapFrame = nullptr;
 		Frame* gameTimerFrame = nullptr;
+		Frame* modTextFrame = nullptr; // script mods' lines (barony.setHudText)
 		Frame* allyStatusFrame = nullptr;
 		Frame* minotaurFrame = nullptr;
 		Frame* minotaurSharedDisplay = nullptr;
@@ -1719,6 +1720,7 @@ public:
 		const int getActionIconForPlayer(ActionPrompts prompt, std::string& promptString) const;
 		void processHUD();
 		void updateGameTimer();
+		void updateModTextFrame();
 		void updateMinimapPrompts();
 		int XP_FRAME_WIDTH = 650;
 		int XP_FRAME_START_Y = 44;
