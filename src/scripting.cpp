@@ -214,6 +214,7 @@ namespace Scripting
 
 		// barony.onBeforeSpellCast(fn): fn(spellName, player) runs before a spell's cost is paid.
 		// Returning false (optionally followed by a message for the caster) rejects the cast.
+		// It can run twice per cast (before and after the cast animation), so fn should only check.
 		int api_onBeforeSpellCast(lua_State* L)
 		{
 			addCallback(onBeforeSpellCastCallbacks, L);

@@ -57,9 +57,11 @@ namespace Scripting
 
 	// Fires onBeforeSpellCast on the host before a cast's mana is paid (or fizzle is rolled).
 	// Returns false if a callback rejected the cast; its message has then been shown to the
-	// caster. Host only for now: the caster's machine has already played the cast animation.
-	// Running it on the caster's machine too (in castSpellInit, before the animation) needs
-	// whatever state the callbacks read, e.g. shared values, to be synced to clients first.
+	// caster. Host only. It runs twice per cast: in castSpellInit, before the cast animation,
+	// for the host's own players, and again in castSpell once the animation is done, since
+	// things may have changed meanwhile. A remote client's cast is only checked the second
+	// time, because the client plays its animation first. Checking up front on clients too
+	// needs whatever state the callbacks read, e.g. shared values, to be synced to them.
 	bool onBeforeSpellCast(spell_t* spell, int player);
 
 	// Fires onSpellCast once a cast has passed the fizzle checks and mana is paid. `player` is

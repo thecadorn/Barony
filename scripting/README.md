@@ -47,7 +47,7 @@ The complete, typed API is in [`barony.d.lua`](barony.d.lua). If your editor use
 | `barony.onInit(fn())` | Once at startup, after all script mods have loaded. Define custom spells here. |
 | `barony.onGameStart(fn(player))` | A new run starts, after each local player's class loadout is set up. Not called when loading a save. |
 | `barony.onBeforeGameplayStart(fn(player))` | A new run is fully set up, including the default hotbar, right before play begins. Arrange the hotbar here. |
-| `barony.onBeforeSpellCast(fn(spellName, player))` | A spell is about to be cast, before any mana is spent. Return `false, "reason"` to refuse it; the caster sees the reason. |
+| `barony.onBeforeSpellCast(fn(spellName, player))` | A spell is about to be cast, before any mana is spent. Return `false, "reason"` to refuse it; the caster sees the reason. Called before the cast animation and again when it finishes (only the second time for clients in multiplayer), so only check things here, don't change them. |
 | `barony.onSpellCast(fn(spellName, player))` | Any spell is successfully cast. `player` is `nil` for monsters and traps. Return `false` to skip the spell's normal effect. |
 
 **Functions and objects**

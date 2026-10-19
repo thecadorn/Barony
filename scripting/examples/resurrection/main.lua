@@ -10,7 +10,7 @@
 -- Every new character learns the spell with it on the hotbar.
 -- Install by copying this folder to ~/.barony/scripts/resurrection/
 
-local MANA_COST = 30
+local MANA_COST = 10
 local STARTING_CHARGES = 3
 local CHARGES = "resurrection_charges" -- name of the shared value
 

@@ -262,6 +262,18 @@ void castSpellInit(Uint32 caster_uid, spell_t* spell, bool usingSpellbook, bool 
 		return;
 	}
 
+	// let script mods refuse the cast up front, before the animation plays or any gold is spent.
+	// This only runs where scripts can see the game state (host and singleplayer); castSpell()
+	// checks again when the animation finishes, which also covers remote clients' casts.
+	if ( player >= 0 && !Scripting::onBeforeSpellCast(spell, player) )
+	{
+		if ( players[player]->isLocalPlayer() )
+		{
+			playSound(563, 64);
+		}
+		return;
+	}
+
 	if ( player >= 0 )
 	{
 		int goldCost = getGoldCostOfSpell(spell, player);
