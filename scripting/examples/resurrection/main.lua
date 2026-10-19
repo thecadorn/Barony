@@ -64,7 +64,12 @@ barony.onBeforeSpellCast(function(spellName, player)
 	if spellName ~= "spell_resurrection" then
 		return
 	end
-	if (barony.getShared(CHARGES) or 0) < 1 then
+	-- this also runs on a client's machine, where the charge count and who has fallen are the
+	-- host's last update (charges are nil if none has arrived yet), so right after a change a
+	-- client can briefly be refused when it shouldn't be; the host checks again before the
+	-- cast goes ahead
+	local charges = barony.getShared(CHARGES)
+	if charges ~= nil and charges < 1 then
 		return false, "The party has no resurrection charges left."
 	end
 	if findFallenAlly() == nil then

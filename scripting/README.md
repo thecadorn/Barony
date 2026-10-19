@@ -47,7 +47,7 @@ The complete, typed API is in [`barony.d.lua`](barony.d.lua). If your editor use
 | `barony.onInit(fn())` | Once at startup, after all script mods have loaded. Define custom spells here. |
 | `barony.onGameStart(fn(player))` | A new run starts, after each local player's class loadout is set up. Not called when loading a save. |
 | `barony.onBeforeGameplayStart(fn(player))` | A new run is fully set up, including the default hotbar, right before play begins. Arrange the hotbar here. |
-| `barony.onBeforeSpellCast(fn(spellName, player))` | A spell is about to be cast, before any mana is spent. Return `false, "reason"` to refuse it; the caster sees the reason. Called before the cast animation and again when it finishes (only the second time for clients in multiplayer), so only check things here, don't change them. |
+| `barony.onBeforeSpellCast(fn(spellName, player))` | A spell is about to be cast, before any mana is spent. Return `false, "reason"` to refuse it; the caster sees the reason. Called on the caster's machine before the cast animation, and again on the host when it finishes, so only check things here, don't change them. The host's check decides. |
 | `barony.onSpellCast(fn(spellName, player))` | Any spell is successfully cast. `player` is `nil` for monsters and traps. Return `false` to skip the spell's normal effect. |
 
 **Functions and objects**
@@ -62,7 +62,7 @@ The complete, typed API is in [`barony.d.lua`](barony.d.lua). If your editor use
 | `barony.maxPlayers` | How many player slots there are; players are numbered 0 to `maxPlayers - 1`. |
 | `barony.message(player, text)` | Shows a line in a player's in-game message log. |
 | `barony.isHost()` | `true` on the host and in single player, where gameplay is decided. |
-| `barony.setShared(name, value)` / `barony.getShared(name)` | A named number for the current run (for example a party-wide counter). Saved with the game, cleared when a new run starts. Host only for now. |
+| `barony.setShared(name, value)` / `barony.getShared(name)` | A named number for the current run (for example a party-wide counter). Saved with the game, cleared when a new run starts. Only the host can set it. Clients can read it, but get the host's value as of the last update (`nil` until the first one arrives). |
 | `barony.hotbar(player)` | The player's hotbar: `getSlot`, `setSlot`, `clearSlot`, `firstEmptySlot`. Slots are numbered 0–9. |
 | `barony.inventory(player)` | The player's inventory: `findSpell(spellName)`. |
 

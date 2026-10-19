@@ -83,13 +83,36 @@ namespace Scripting
 		// charges. They belong to the current run: cleared when a new run starts, stored in
 		// the save game and restored on load.
 		//
-		// They live on the host only, which is enough while only host-side code reads them
-		// (onSpellCast). To let clients read them too (e.g. to refuse a cast up front, or to
-		// show a value in the UI), the host would send a packet ("SHRD": name + value) to every
-		// client whenever setShared() changes a value, plus a full snapshot when a client joins
-		// or a level loads; clients would store the received values in this same map and
-		// getShared() would stop being host-only.
+		// Only the host changes them. It sends each change to the clients ("SHRD": name + value),
+		// and sends them all to a client that asks ("SHRQ") after starting a run or loading a
+		// level. Clients keep the received values in this same map, so on a client getShared()
+		// returns the host's value as of the last update, which can briefly be out of date.
 		std::map<std::string, lua_Number> sharedValues;
+
+		// host: sends one shared value to a remote client; a null value means it was removed
+		void sendSharedValue(int player, const char* name, const lua_Number* value)
+		{
+			if ( multiplayer != SERVER || player <= 0 || player >= MAXPLAYERS
+				|| client_disconnected[player] || players[player]->isLocalPlayer() )
+			{
+				return;
+			}
+			char text[32] = "";
+			if ( value )
+			{
+				snprintf(text, sizeof(text), "%.17g", (double)*value);
+			}
+			const size_t textLength = strlen(text) + 1;
+			const size_t nameLength = strlen(name) + 1; // names are at most 64 characters
+			memcpy(net_packet->data, "SHRD", 4);
+			net_packet->data[4] = value ? 0 : 1; // 1: the value was removed
+			memcpy(&net_packet->data[5], text, textLength);
+			memcpy(&net_packet->data[5 + textLength], name, nameLength);
+			net_packet->len = 5 + textLength + nameLength;
+			net_packet->address.host = net_clients[player - 1].host;
+			net_packet->address.port = net_clients[player - 1].port;
+			sendPacketSafe(net_sock, -1, net_packet, player - 1);
+		}
 
 		void* sandboxAlloc(void*, void* ptr, size_t osize, size_t nsize)
 		{
@@ -214,7 +237,9 @@ namespace Scripting
 
 		// barony.onBeforeSpellCast(fn): fn(spellName, player) runs before a spell's cost is paid.
 		// Returning false (optionally followed by a message for the caster) rejects the cast.
-		// It can run twice per cast (before and after the cast animation), so fn should only check.
+		// It runs on the caster's machine before the cast animation, then on the host once the
+		// animation is done, so fn should only check things. On a client, shared values can be
+		// slightly out of date and only the host can change them; the host's check decides.
 		int api_onBeforeSpellCast(lua_State* L)
 		{
 			addCallback(onBeforeSpellCastCallbacks, L);
@@ -997,36 +1022,46 @@ namespace Scripting
 			return true;
 		}
 
-		bool checkSharedAccess(lua_State* L, const char* function)
+		void checkSharedName(lua_State* L)
+		{
+			const char* name = luaL_checkstring(L, 1);
+			luaL_argcheck(L, isValidSharedName(name), 1, "name must be 1-64 letters, digits or _");
+		}
+
+		// barony.setShared(name, value): stores a number (or nil to remove it) and sends it to
+		// the clients. Host only.
+		int api_setShared(lua_State* L)
 		{
 			if ( multiplayer == CLIENT )
 			{
-				luaL_error(L, "barony.%s is host-only (shared values aren't sent to clients yet)", function);
+				return luaL_error(L, "barony.setShared is host-only");
 			}
-			const char* name = luaL_checkstring(L, 1);
-			luaL_argcheck(L, isValidSharedName(name), 1, "name must be 1-64 letters, digits or _");
-			return true;
-		}
-
-		// barony.setShared(name, value): stores a number (or nil to remove it). Host only.
-		int api_setShared(lua_State* L)
-		{
-			checkSharedAccess(L, "setShared");
+			checkSharedName(L);
 			const char* name = lua_tostring(L, 1);
+			const lua_Number* sent = nullptr;
+			lua_Number value = 0;
 			if ( lua_isnoneornil(L, 2) )
 			{
 				sharedValues.erase(name);
-				return 0;
 			}
-			const lua_Number value = luaL_checknumber(L, 2);
-			sharedValues[name] = value;
+			else
+			{
+				value = luaL_checknumber(L, 2);
+				sharedValues[name] = value;
+				sent = &value;
+			}
+			for ( int c = 1; c < MAXPLAYERS; ++c )
+			{
+				sendSharedValue(c, name, sent);
+			}
 			return 0;
 		}
 
-		// barony.getShared(name): the stored number, or nil. Host only.
+		// barony.getShared(name): the stored number, or nil. On a client this is the host's
+		// value as of the last update received, or nil if none has arrived yet.
 		int api_getShared(lua_State* L)
 		{
-			checkSharedAccess(L, "getShared");
+			checkSharedName(L);
 			auto find = sharedValues.find(lua_tostring(L, 1));
 			if ( find == sharedValues.end() )
 			{
@@ -1251,7 +1286,7 @@ namespace Scripting
 
 	bool onBeforeSpellCast(spell_t* spell, int player)
 	{
-		if ( !L || !spell || multiplayer == CLIENT )
+		if ( !L || !spell )
 		{
 			return true;
 		}
@@ -1377,6 +1412,56 @@ namespace Scripting
 	void resetSharedValues()
 	{
 		sharedValues.clear();
+	}
+
+	void sendSharedValues(int player)
+	{
+		for ( auto& value : sharedValues )
+		{
+			sendSharedValue(player, value.first.c_str(), &value.second);
+		}
+	}
+
+	void receiveSharedValue()
+	{
+		if ( multiplayer != CLIENT || net_packet->len < 7 )
+		{
+			return;
+		}
+		net_packet->data[net_packet->len - 1] = 0; // the name ends the packet
+		const char* text = (const char*)&net_packet->data[5];
+		const size_t textLength = strnlen(text, net_packet->len - 5) + 1;
+		if ( 5 + textLength >= (size_t)net_packet->len )
+		{
+			return;
+		}
+		const char* name = text + textLength;
+		if ( !isValidSharedName(name) )
+		{
+			return;
+		}
+		if ( net_packet->data[4] == 1 )
+		{
+			sharedValues.erase(name);
+		}
+		else
+		{
+			sharedValues[name] = (lua_Number)atof(text);
+		}
+	}
+
+	void requestSharedValues()
+	{
+		if ( multiplayer != CLIENT )
+		{
+			return;
+		}
+		memcpy(net_packet->data, "SHRQ", 4);
+		net_packet->data[4] = clientnum;
+		net_packet->len = 5;
+		net_packet->address.host = net_server.host;
+		net_packet->address.port = net_server.port;
+		sendPacketSafe(net_sock, -1, net_packet, 0);
 	}
 
 	std::vector<std::pair<std::string, std::string>> savedSharedTable()

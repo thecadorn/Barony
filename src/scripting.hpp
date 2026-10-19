@@ -52,16 +52,23 @@ namespace Scripting
 	std::vector<std::pair<std::string, std::string>> savedSharedTable();
 	void restoreSharedValues(const std::vector<std::pair<std::string, std::string>>& additionalData);
 
+	// Only the host changes shared values; clients keep a copy for reading. The host sends each
+	// change as it happens. sendSharedValues() sends all of them to one remote client (host), in
+	// reply to requestSharedValues() (client, after starting a run or loading a level).
+	// receiveSharedValue() handles one "SHRD" packet in net_packet (client).
+	void sendSharedValues(int player);
+	void requestSharedValues();
+	void receiveSharedValue();
+
 	// Re-adds script-defined spells' tooltip text after readTooltipsFromFile() reloads templates.
 	void reapplyCustomSpellTooltips();
 
-	// Fires onBeforeSpellCast on the host before a cast's mana is paid (or fizzle is rolled).
-	// Returns false if a callback rejected the cast; its message has then been shown to the
-	// caster. Host only. It runs twice per cast: in castSpellInit, before the cast animation,
-	// for the host's own players, and again in castSpell once the animation is done, since
-	// things may have changed meanwhile. A remote client's cast is only checked the second
-	// time, because the client plays its animation first. Checking up front on clients too
-	// needs whatever state the callbacks read, e.g. shared values, to be synced to them.
+	// Fires onBeforeSpellCast before a cast's mana is paid (or fizzle is rolled). Returns false
+	// if a callback rejected the cast; its message has then been shown to the caster. It runs
+	// twice per cast: in castSpellInit on the caster's machine, before the cast animation, and
+	// again in castSpell on the host once the animation is done, since things may have changed
+	// meanwhile (and a client's copy of shared values may be out of date). The host's check
+	// decides.
 	bool onBeforeSpellCast(spell_t* spell, int player);
 
 	// Fires onSpellCast once a cast has passed the fizzle checks and mana is paid. `player` is
